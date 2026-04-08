@@ -79,8 +79,8 @@ KPI_DEFINITIONS: dict[str, dict] = {
         "icon": "💰",
         "codes": [],
         "name_patterns": [
-            "ventas netas", "ingresos netos", "total ventas",
-            "ventas", "ingresos", "revenue", "sales",
+            "ventas netas", "total ventas", "ventas",
+            "ingresos netos", "ingresos", "revenue", "sales",
         ],
         "is_margin": False,
     },
@@ -108,6 +108,7 @@ KPI_DEFINITIONS: dict[str, dict] = {
         "name_patterns": [
             "utilidad neta", "resultado neto", "ganancia neta",
             "resultado del ejercicio", "net income",
+            "utilidad neta s/a",   # Guantex
         ],
         "is_margin": False,
     },

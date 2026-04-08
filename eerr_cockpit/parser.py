@@ -73,8 +73,8 @@ def _parse_num(val) -> float:
 
 def _detect_sheets(xl: pd.ExcelFile) -> dict[str, tuple[str, str]]:
     """
-    Retorna {sheet_name: (currency, year)} donde year puede ser '2025'|'2024'|'unknown'.
-    Heurística: busca 'ARS'/'USD'/'PESOS'/'DOLAR' y '2024'/'2025' en el nombre.
+    Retorna {sheet_name: (currency, year)} donde year es '20XX' o 'unknown'.
+    Heurística: busca 'ARS'/'USD'/'PESOS'/'DOLAR' y cualquier año 20XX en el nombre.
     """
     result: dict[str, tuple[str, str]] = {}
 
@@ -87,17 +87,11 @@ def _detect_sheets(xl: pd.ExcelFile) -> dict[str, tuple[str, str]]:
         elif any(k in up for k in ("ARS", "PESOS", "PES", "$AR", "ARS$")):
             currency = "ARS"
         else:
-            # Si no detecta moneda, saltear (podría ser hoja de metadatos)
-            # salvo que sea la única hoja
             currency = "ARS"  # asumir ARS por defecto
 
-        # Año
-        if "2025" in up:
-            year = "2025"
-        elif "2024" in up:
-            year = "2024"
-        else:
-            year = "unknown"
+        # Año: detectar cualquier patrón 20XX en el nombre de la hoja
+        year_match = re.search(r"20\d{2}", up)
+        year = year_match.group() if year_match else "unknown"
 
         result[name] = (currency, year)
 
@@ -108,18 +102,28 @@ def _resolve_year_unknowns(
     sheets_meta: dict[str, tuple[str, str]]
 ) -> dict[str, tuple[str, str]]:
     """
-    Si hay hojas con año desconocido, las asigna: la primera → 2025, la segunda → 2024.
+    Si hay hojas con año desconocido, las asigna al año más reciente conocido - 1,
+    o usa 2025/2024 como fallback.
     """
     unknown = [s for s, (_, y) in sheets_meta.items() if y == "unknown"]
     if not unknown:
         return sheets_meta
 
+    known_years = sorted(
+        {y for _, (_, y) in sheets_meta.items() if y != "unknown"},
+        reverse=True,
+    )
+    if known_years:
+        # Asignar años decrecientes desde el más alto conocido - 1
+        start = int(known_years[0]) - 1
+        fallback = [str(start - i) for i in range(len(unknown))]
+    else:
+        fallback = ["2025", "2024"] + [str(2023 - i) for i in range(max(0, len(unknown) - 2))]
+
     resolved = dict(sheets_meta)
-    years_to_assign = ["2025", "2024"]
     for i, sheet in enumerate(unknown):
         curr = resolved[sheet][0]
-        yr = years_to_assign[i] if i < len(years_to_assign) else "2025"
-        resolved[sheet] = (curr, yr)
+        resolved[sheet] = (curr, fallback[i] if i < len(fallback) else "2025")
     return resolved
 
 
@@ -326,7 +330,7 @@ class EERRParser:
         sheets_meta = _detect_sheets(xl)
         sheets_meta = _resolve_year_unknowns(sheets_meta)
 
-        # Estructura de resultado
+        # Estructura de resultado (soporta cualquier año 20XX)
         result: dict[str, dict[str, Optional[pd.DataFrame]]] = {}
 
         for sheet_name, (currency, year) in sheets_meta.items():
@@ -334,20 +338,13 @@ class EERRParser:
             if df is None:
                 continue
             if currency not in result:
-                result[currency] = {"2025": None, "2024": None}
-            if year in ("2025", "2024"):
-                if result[currency][year] is None:
-                    result[currency][year] = df
-                else:
-                    self.warnings.append(
-                        f"[{sheet_name}] Ya existe una hoja para {currency}/{year}. Se ignora."
-                    )
+                result[currency] = {}
+            if year not in result[currency]:
+                result[currency][year] = df
             else:
-                # año desconocido → llenar 2025 primero, luego 2024
-                for yr in ("2025", "2024"):
-                    if result[currency].get(yr) is None:
-                        result[currency][yr] = df
-                        break
+                self.warnings.append(
+                    f"[{sheet_name}] Ya existe una hoja para {currency}/{year}. Se ignora."
+                )
 
         if not result:
             raise ValueError(

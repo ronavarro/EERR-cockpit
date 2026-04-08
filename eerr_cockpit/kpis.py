@@ -79,6 +79,10 @@ def _find_row(df: pd.DataFrame, kpi_key: str, custom_codes: dict) -> Optional[pd
     for pattern in kpi_def["name_patterns"]:
         mask = df["name"].str.lower().str.contains(re.escape(pattern.lower()), na=False, regex=True)
         if mask.any():
+            # Preferir match exacto sobre match parcial (evita "EBITDA Ajustado" vs "EBITDA")
+            exact = df["name"].str.lower() == pattern.lower()
+            if exact.any():
+                return df[exact].iloc[0]
             return df[mask].iloc[0]
 
     return None
