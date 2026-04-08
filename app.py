@@ -4,6 +4,7 @@ streamlit run app.py
 """
 from __future__ import annotations
 import base64
+import datetime as _dt
 from pathlib import Path
 from typing import Optional
 
@@ -11,11 +12,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from eerr_cockpit import auth, storage
 from eerr_cockpit.config import KPI_DEFINITIONS, MONTH_LABELS_ES, QUARTER_LABELS_ES
+from eerr_cockpit.guantex_parser import GuantexParser, is_guantex_format
 from eerr_cockpit.hierarchy import detect_hierarchy, get_period_columns
 from eerr_cockpit.kpis import calc_delta, fmt_currency, fmt_percent, get_kpis, get_top_variations
+from eerr_cockpit.parser import EERRParser
 from eerr_cockpit.pdf_export import create_pdf_report
-from mock_data import get_mock_data
 
 # ── Brand palette ────────────────────────────────────────────────
 CN   = "#0F1F4A"   # navy
@@ -30,6 +33,12 @@ CR   = "#B91C1C"   # red
 CRS  = "#FEE2E2"   # red soft
 CMU  = "#64748B"   # muted
 CBRD = "#D1DDEF"   # border
+
+# ── Mes labels (en español, usados en sidebar y upload tab) ──────
+_MONTHS_ES = [
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+]
 
 # ── Page config ───────────────────────────────────────────────────
 st.set_page_config(
@@ -125,6 +134,21 @@ html, body, [data-testid="stAppViewContainer"] {{
 [data-testid="stSidebar"] hr {{
     border-color: rgba(255,255,255,.15) !important;
 }}
+/* Sidebar buttons (ej: Cerrar sesión) */
+[data-testid="stSidebar"] .stButton button {{
+    background: rgba(255,255,255,.15) !important;
+    color: white !important;
+    border: 1px solid rgba(255,255,255,.3) !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    transition: background .15s;
+}}
+[data-testid="stSidebar"] .stButton button:hover {{
+    background: rgba(255,255,255,.25) !important;
+    border-color: rgba(255,255,255,.5) !important;
+}}
+
 /* Section labels inside sidebar */
 .sb-section {{
     font-size: 9px; font-weight: 800; letter-spacing: 1.5px;
@@ -163,24 +187,59 @@ html, body, [data-testid="stAppViewContainer"] {{
     background: rgba(255,255,255,.2);
     margin: 0 4px;
 }}
+.app-header-text {{
+    display: flex; flex-direction: column;
+    justify-content: center; gap: 0;
+    transform: translateY(-3px);
+}}
 .app-header-text h1 {{
     color: white; font-size: 18px; font-weight: 800;
-    margin: 0; letter-spacing: -.3px;
+    margin: 0 0 1px; letter-spacing: -.3px; line-height: 1;
 }}
 .app-header-text p {{
     color: rgba(255,255,255,.55);
-    font-size: 11px; margin: 2px 0 0;
+    font-size: 11px; margin: 0; line-height: 1;
 }}
 .header-right {{ margin-left: auto; display: flex; align-items: center; gap: 10px; }}
-.period-chip {{
-    background: rgba(255,255,255,.14);
-    color: white;
-    border: 1px solid rgba(255,255,255,.28);
-    border-radius: 20px;
-    padding: 5px 14px;
-    font-size: 12px; font-weight: 700;
-    white-space: nowrap;
+/* ── Header nominal/real toggle ── */
+.hdr-toggle-wrap {{
+    display: flex; align-items: center; gap: 8px;
+    color: rgba(255,255,255,.9);
+    font-size: 11.5px; font-weight: 600;
+    letter-spacing: .1px;
+    cursor: pointer;
+    user-select: none;
 }}
+.hdr-toggle-wrap input[type=checkbox] {{ display: none; }}
+.hdr-toggle-track {{
+    position: relative;
+    width: 38px; height: 22px;
+    background: rgba(255,255,255,.22);
+    border: 1px solid rgba(255,255,255,.35);
+    border-radius: 11px;
+    transition: background .2s, border-color .2s;
+    flex-shrink: 0;
+}}
+.hdr-toggle-track::before {{
+    content: '';
+    position: absolute;
+    width: 16px; height: 16px;
+    left: 2px; top: 2px;
+    background: white;
+    border-radius: 50%;
+    box-shadow: 0 1px 4px rgba(0,0,0,.25);
+    transition: transform .2s;
+}}
+.hdr-toggle-wrap input:checked ~ .hdr-toggle-track {{
+    background: #22c55e;
+    border-color: #22c55e;
+}}
+.hdr-toggle-wrap input:checked ~ .hdr-toggle-track::before {{
+    transform: translateX(16px);
+}}
+.hdr-toggle-lbl-on  {{ color: rgba(255,255,255,.4); }}
+.hdr-toggle-wrap input:checked ~ .hdr-toggle-lbl-off {{ color: rgba(255,255,255,.4); }}
+.hdr-toggle-wrap input:checked ~ .hdr-toggle-lbl-on  {{ color: rgba(255,255,255,.95); }}
 
 
 /* ── Tabs ── */
@@ -331,31 +390,73 @@ def _ytd(df: pd.DataFrame, m: int) -> pd.Series:
 
 
 # ── Load & prepare data ───────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def _load() -> dict:
+def _process_raw(raw: dict) -> dict:
+    """Normalise column names and detect hierarchy for a raw data dict."""
     from eerr_cockpit.config import PERIOD_MAP
-    raw = get_mock_data()
     out: dict = {}
     for cur, yrs in raw.items():
         out[cur] = {}
         for yr, df in yrs.items():
+            if df is None:
+                continue
             col_map = {}
             for col in df.columns:
                 cl = col.lower().strip()
                 if cl in PERIOD_MAP:
                     pt, pn = PERIOD_MAP[cl]
                     col_map[col] = f"{pt}_{pn:02d}"
-                elif cl in ["1 trim","2 trim","3 trim","4 trim"]:
+                elif cl in ["1 trim", "2 trim", "3 trim", "4 trim"]:
                     col_map[col] = f"quarter_{int(cl[0]):02d}"
                 elif cl in ["año", "year", "total"]:
                     col_map[col] = "year_00"
             df2 = df.rename(columns=col_map)
-            pc  = get_period_columns(df2)
+            pc = get_period_columns(df2)
             if "is_subtotal" not in df2.columns:
                 df2 = detect_hierarchy(df2, pc)
             df2[pc] = df2[pc].fillna(0)
             out[cur][yr] = df2
     return out
+
+
+# ── Consolidación de sociedades ───────────────────────────────────────
+def _consolidate(df: pd.DataFrame) -> pd.DataFrame:
+    """Suma columnas numéricas de todas las sociedades agrupando por (code, name).
+    Preserva el orden de filas de la primera sociedad encontrada."""
+    num_cols = [c for c in df.columns if c.startswith(("month_", "quarter_", "year_"))]
+    meta = ["tag", "is_subtotal", "level"]
+    agg: dict = {c: "sum" for c in num_cols}
+    for m in meta:
+        if m in df.columns:
+            agg[m] = "first"
+    agg["code"] = "first"
+    agg["name"] = "first"
+
+    df = df.copy()
+    df["_gk"] = (
+        df["code"].apply(lambda x: str(int(x)) if pd.notna(x) and x != "" else "")
+        + "|"
+        + df["name"].fillna("")
+    )
+    result = df.groupby("_gk", as_index=False, sort=False).agg(agg)
+    return result.drop(columns=["_gk"])
+
+
+def _filter_sociedad(df: pd.DataFrame, sociedad: str) -> pd.DataFrame:
+    """Filtra o consolida el DataFrame según la sociedad seleccionada."""
+    if df is None or "_sociedad" not in df.columns:
+        return df
+    if sociedad == "Consolidado":
+        return _consolidate(df)
+    return df[df["_sociedad"] == sociedad].copy()
+
+
+@st.cache_data(show_spinner=False)
+def _load(username: str, year: int, month: int) -> Optional[dict]:
+    """Load the EERR data for a specific uploaded period."""
+    raw = storage.load_upload(username, year, month)
+    if raw is None:
+        return None
+    return _process_raw(raw)
 
 
 # ── Plotly base theme ─────────────────────────────────────────────
@@ -391,14 +492,22 @@ def _header(period: str, currency: str) -> None:
             <p>Estado de Resultados · Análisis Ejecutivo</p>
         </div>
         <div class="header-right">
-            <span class="period-chip">📅 {period} &nbsp;·&nbsp; {currency}</span>
+            <label class="hdr-toggle-wrap">
+                <input type="checkbox" id="hdr-toggle-chk">
+                <span class="hdr-toggle-lbl-off">Nominal</span>
+                <span class="hdr-toggle-track"></span>
+                <span class="hdr-toggle-lbl-on">Real</span>
+            </label>
         </div>
     </div>""", unsafe_allow_html=True)
 
 
 # ── Sidebar ────────────────────────────────────────────────────────
-def _sidebar(data: dict) -> tuple:
-    """Renders navigation sidebar. Returns (currency, sel_key, sel_label, top_n, alert_mode)."""
+def _sidebar(data: dict, uploads: list) -> tuple:
+    """Renders navigation sidebar.
+    Returns (currency, sel_key, sel_label, top_n, alert_mode, sociedad).
+    sociedad is None when data has no _sociedad column.
+    """
     with st.sidebar:
         # ── Logo / branding ───────────────────────────────────────
         b64 = _logo_b64()
@@ -427,6 +536,14 @@ def _sidebar(data: dict) -> tuple:
                 unsafe_allow_html=True,
             )
 
+        # ── ARCHIVO EERR ──────────────────────────────────────────
+        st.markdown('<div class="sb-section">Archivo EERR</div>', unsafe_allow_html=True)
+        _ul = {
+            f"{_MONTHS_ES[u['month']-1]} {u['year']}": u
+            for u in reversed(uploads)
+        }
+        st.selectbox("Período cargado", list(_ul.keys()), key="sb_upload")
+
         # ── CONFIGURACIÓN ─────────────────────────────────────────
         st.markdown('<div class="sb-section">Configuración</div>', unsafe_allow_html=True)
 
@@ -434,13 +551,22 @@ def _sidebar(data: dict) -> tuple:
             "Moneda", list(data.keys()), horizontal=True, key="sb_currency",
         )
 
-        # Period options depend on selected currency
-        df25_c = data[currency].get("2025")
+        # Period options: use the most recent year available for this currency
+        _yr_latest = max(data[currency].keys()) if data[currency] else "2025"
+        df25_c = data[currency].get(_yr_latest)
         pcols  = _sorted_p(get_period_columns(df25_c)) if df25_c is not None else []
+
+        # Solo mostrar períodos que tienen datos reales (suma absoluta > 0)
+        def _has_data(col: str, df) -> bool:
+            if df is None or col not in df.columns:
+                return False
+            return float(df[col].abs().sum()) > 0
+
         popts: dict[str, str] = {}
         for p in pcols:
-            popts[p] = _pl(p)
-        for mc in [p for p in pcols if p.startswith("month_")]:
+            if _has_data(p, df25_c):
+                popts[p] = _pl(p)
+        for mc in [p for p in pcols if p.startswith("month_") and _has_data(p, df25_c)]:
             n = int(mc.split("_")[1])
             popts[f"ytd_{n:02d}"] = f"YTD {MONTH_LABELS_ES[n-1]}"
 
@@ -448,6 +574,19 @@ def _sidebar(data: dict) -> tuple:
         sel_key   = next((k for k, v in popts.items() if v == sel_label), None)
 
         st.markdown('<div style="height:4px"></div>', unsafe_allow_html=True)
+
+        # ── SOCIEDAD (solo cuando los datos tienen columna _sociedad) ─────
+        _yr_latest2 = max(data[currency].keys()) if data[currency] else None
+        _df_check   = data[currency].get(_yr_latest2) if _yr_latest2 else None
+        _has_soc    = _df_check is not None and "_sociedad" in _df_check.columns
+        if _has_soc:
+            _socs = sorted(_df_check["_sociedad"].dropna().unique().tolist())
+            st.markdown('<div class="sb-section">Sociedad</div>', unsafe_allow_html=True)
+            sociedad = st.radio(
+                "Vista", ["Consolidado"] + _socs, key="sb_sociedad",
+            )
+        else:
+            sociedad = None
 
         # ── ALERTAS ───────────────────────────────────────────────
         st.markdown('<div class="sb-section">Alertas</div>', unsafe_allow_html=True)
@@ -457,17 +596,26 @@ def _sidebar(data: dict) -> tuple:
             "Tipo", ["Todos", "Positivos", "Negativos"], key="sb_mode",
         )
 
-        # ── INFO ──────────────────────────────────────────────────
+        # ── USUARIO ───────────────────────────────────────────────
         st.markdown('<div style="height:6px"></div>', unsafe_allow_html=True)
         st.divider()
+        username = auth.current_user()
+        dname    = auth.display_name(username)
         st.markdown(
-            f'<div style="padding:0 4px;font-size:10.5px;color:rgba(255,255,255,.38);'
-            f'line-height:1.6">Ascent Advisors · Demo<br>'
-            f'Datos simulados · 2024–2025</div>',
+            f'<div style="padding:0 4px 10px;font-size:11px;color:rgba(255,255,255,.65);">'
+            f'👤 &nbsp;<b>{dname}</b></div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Cerrar sesión", use_container_width=True, key="sb_logout"):
+            auth.logout()
+
+        st.markdown(
+            f'<div style="padding:6px 4px 0;font-size:10px;color:rgba(255,255,255,.3);'
+            f'line-height:1.6">Ascent Advisors · EERR Cockpit</div>',
             unsafe_allow_html=True,
         )
 
-    return currency, sel_key, sel_label, top_n, alert_mode
+    return currency, sel_key, sel_label, top_n, alert_mode, sociedad
 
 
 # ── KPI cards ────────────────────────────────────────────────────
@@ -496,7 +644,8 @@ def _kpi_cards(kpis: list, currency: str) -> None:
 
 
 # ── Comparativo chart ─────────────────────────────────────────────
-def _chart_comparativo(kpis: list, currency: str) -> None:
+def _chart_comparativo(kpis: list, currency: str,
+                       yr_cur: str = "2025", yr_prev: str = "2024") -> None:
     nm = [k for k in kpis if k["found"] and not k["is_margin"] and k["value_2024"] is not None]
     if not nm:
         return
@@ -507,25 +656,25 @@ def _chart_comparativo(kpis: list, currency: str) -> None:
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        name="2024", x=labels, y=v24,
+        name=yr_prev, x=labels, y=v24,
         marker=dict(color=CP, line=dict(width=0), cornerradius=6),
         width=0.34, offset=-0.18,
-        hovertemplate="<b>2024</b>  %{x}<br>%{customdata}<extra></extra>",
+        hovertemplate=f"<b>{yr_prev}</b>  %{{x}}<br>%{{customdata}}<extra></extra>",
         customdata=[fmt_currency(v, currency, compact=True) for v in v24],
     ))
     fig.add_trace(go.Bar(
-        name="2025", x=labels, y=v25,
+        name=yr_cur, x=labels, y=v25,
         marker=dict(color=c25, line=dict(width=0), cornerradius=6),
         width=0.34, offset=0.18,
         text=[fmt_currency(v, currency, compact=True) for v in v25],
         textposition="outside",
         textfont=dict(size=10, color=CN, family="Inter"),
-        hovertemplate="<b>2025</b>  %{x}<br>%{customdata}<extra></extra>",
+        hovertemplate=f"<b>{yr_cur}</b>  %{{x}}<br>%{{customdata}}<extra></extra>",
         customdata=[fmt_currency(v, currency, compact=True) for v in v25],
     ))
     fig.update_layout(
         **_PB, barmode="overlay", height=280,
-        title=dict(text="<b>KPIs 2025 vs 2024</b>",
+        title=dict(text=f"<b>KPIs {yr_cur} vs {yr_prev}</b>",
                    font=dict(size=13, color=CN), x=0, xanchor="left"),
         xaxis=dict(showgrid=False, tickfont=dict(size=12), showline=False, zeroline=False),
         yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.04)",
@@ -537,7 +686,7 @@ def _chart_comparativo(kpis: list, currency: str) -> None:
 
 
 # ── Waterfall bridge ──────────────────────────────────────────────
-def _chart_waterfall(kpis: list, currency: str) -> None:
+def _chart_waterfall(kpis: list, currency: str, yr_prev: str = "2024") -> None:
     items = [(k["label"], k["delta_abs"]) for k in kpis
              if k["found"] and not k["is_margin"] and k["delta_abs"] is not None]
     if not items:
@@ -556,7 +705,7 @@ def _chart_waterfall(kpis: list, currency: str) -> None:
     ))
     fig.update_layout(
         **_PB, height=280, showlegend=False,
-        title=dict(text="<b>Bridge vs 2024</b>",
+        title=dict(text=f"<b>Bridge vs {yr_prev}</b>",
                    font=dict(size=13, color=CN), x=0, xanchor="left"),
         xaxis=dict(showgrid=False, tickfont=dict(size=11), showline=False),
         yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,0.04)",
@@ -594,7 +743,8 @@ def _alerts(df25, df24, col, currency, n, mode) -> None:
 
 
 # ── EERR table ────────────────────────────────────────────────────
-def _table(df25, df24, col, currency, only_sub=False) -> None:
+def _table(df25, df24, col, currency, only_sub=False,
+           yr_cur: str = "2025", yr_prev: str = "2024") -> None:
     rows = []
     for _, row in df25.iterrows():
         is_sub = bool(row.get("is_subtotal", False))
@@ -633,8 +783,8 @@ def _table(df25, df24, col, currency, only_sub=False) -> None:
     st.markdown(
         '<table class="eerr"><thead><tr>'
         '<th style="width:62px">Código</th><th>Nombre</th>'
-        '<th style="text-align:right;width:130px">2025</th>'
-        '<th style="text-align:right;width:130px">Δ vs 2024</th>'
+        f'<th style="text-align:right;width:130px">{yr_cur}</th>'
+        f'<th style="text-align:right;width:130px">Δ vs {yr_prev}</th>'
         '<th style="text-align:right;width:72px">Δ %</th>'
         f'</tr></thead><tbody>{"".join(rows)}</tbody></table>',
         unsafe_allow_html=True,
@@ -667,7 +817,8 @@ def _dd_extract(df25, df24, code_s, name_s):
     return v25, v24, labels
 
 
-def _dd_stats(v25, v24, currency, is_pct) -> None:
+def _dd_stats(v25, v24, currency, is_pct,
+              yr_cur: str = "2025", yr_prev: str = "2024") -> None:
     """6 stat chips: annual totals, delta, best/worst month, H2 vs H1."""
     total25 = sum(v25)
     total24 = sum(v24)
@@ -691,8 +842,8 @@ def _dd_stats(v25, v24, currency, is_pct) -> None:
 
     f = lambda v: _dd_fmt(v, is_pct, currency)
     chips = [
-        ("Total Año 2025",  f(total25), "~"),
-        ("Total Año 2024",  f(total24), "~"),
+        (f"Total Año {yr_cur}",  f(total25), "~"),
+        (f"Total Año {yr_prev}", f(total24), "~"),
         ("Δ Absoluto",      ("+" if da >= 0 else "") + f(da),    "+" if da >= 0 else "-"),
         ("Δ %",             f"{'↑' if dp >= 0 else '↓'} {abs(dp):.1f}%", "+" if dp >= 0 else "-"),
         ("Mejor mes",       f"{MONTH_LABELS_ES[best_i]}  {f(v25[best_i])}",  "~"),
@@ -705,24 +856,25 @@ def _dd_stats(v25, v24, currency, is_pct) -> None:
     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
 
-def _dd_monthly_chart(v25, v24, labels, name_s, currency, is_pct) -> None:
-    """Monthly evolution: area 2024 + bars 2025 + trend + Δ% right axis."""
+def _dd_monthly_chart(v25, v24, labels, name_s, currency, is_pct,
+                      yr_cur: str = "2025", yr_prev: str = "2024") -> None:
+    """Monthly evolution: area prev year + bars current year + trend + Δ% right axis."""
     dpcts = [(v25[i]-v24[i])/abs(v24[i])*100 if abs(v24[i]) > 0.01 else 0. for i in range(len(labels))]
     bar_c = [CL if v25[i] >= v24[i] else "#F87171" for i in range(len(labels))]
     f = lambda v: _dd_fmt(v, is_pct, currency)
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        name="2024", x=labels, y=v24, mode="lines",
+        name=yr_prev, x=labels, y=v24, mode="lines",
         line=dict(color=CP, width=0),
         fill="tozeroy", fillcolor="rgba(197,213,238,.3)",
-        hovertemplate="<b>2024</b> %{x}: %{customdata}<extra></extra>",
+        hovertemplate=f"<b>{yr_prev}</b> %{{x}}: %{{customdata}}<extra></extra>",
         customdata=[f(v) for v in v24],
     ))
     fig.add_trace(go.Bar(
-        name="2025", x=labels, y=v25,
+        name=yr_cur, x=labels, y=v25,
         marker=dict(color=bar_c, line=dict(width=0), cornerradius=6, opacity=0.88),
         width=0.54,
-        hovertemplate="<b>2025</b> %{x}: %{customdata}<extra></extra>",
+        hovertemplate=f"<b>{yr_cur}</b> %{{x}}: %{{customdata}}<extra></extra>",
         customdata=[f(v) for v in v25],
     ))
     fig.add_trace(go.Scatter(
@@ -732,11 +884,11 @@ def _dd_monthly_chart(v25, v24, labels, name_s, currency, is_pct) -> None:
         hoverinfo="skip",
     ))
     fig.add_trace(go.Scatter(
-        name="Δ% vs 2024", x=labels, y=dpcts, mode="lines+markers",
+        name=f"Δ% vs {yr_prev}", x=labels, y=dpcts, mode="lines+markers",
         line=dict(color="#F59E0B", width=2, dash="dot"),
         marker=dict(size=5, color="#F59E0B"),
         yaxis="y2",
-        hovertemplate="%{x}: %{y:.1f}%<extra>Δ% vs 2024</extra>",
+        hovertemplate=f"%{{x}}: %{{y:.1f}}%<extra>Δ% vs {yr_prev}</extra>",
     ))
     yt = "%" if is_pct else f"$ ({currency})"
     fig.update_layout(
@@ -754,29 +906,30 @@ def _dd_monthly_chart(v25, v24, labels, name_s, currency, is_pct) -> None:
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
-def _dd_quarterly_chart(v25, v24, currency, is_pct) -> None:
-    """Quarterly grouped bars 2024 vs 2025."""
+def _dd_quarterly_chart(v25, v24, currency, is_pct,
+                        yr_cur: str = "2025", yr_prev: str = "2024") -> None:
+    """Quarterly grouped bars prev year vs current year."""
     ql = ["1° Trim", "2° Trim", "3° Trim", "4° Trim"]
     q25 = [sum(v25[i*3:(i+1)*3]) for i in range(4)]
     q24 = [sum(v24[i*3:(i+1)*3]) for i in range(4)]
     f = lambda v: _dd_fmt(v, is_pct, currency)
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        name="2024", x=ql, y=q24,
+        name=yr_prev, x=ql, y=q24,
         marker=dict(color=CP, line=dict(width=0), cornerradius=6),
         width=0.32, offset=-0.17,
         customdata=[f(v) for v in q24],
-        hovertemplate="<b>2024</b> %{x}<br>%{customdata}<extra></extra>",
+        hovertemplate=f"<b>{yr_prev}</b> %{{x}}<br>%{{customdata}}<extra></extra>",
     ))
     fig.add_trace(go.Bar(
-        name="2025", x=ql, y=q25,
+        name=yr_cur, x=ql, y=q25,
         marker=dict(color=[CL if q25[i] >= q24[i] else "#F87171" for i in range(4)],
                     line=dict(width=0), cornerradius=6),
         width=0.32, offset=0.17,
         text=[f(v) for v in q25], textposition="outside",
         textfont=dict(size=10, color=CN, family="Inter"),
         customdata=[f(v) for v in q25],
-        hovertemplate="<b>2025</b> %{x}<br>%{customdata}<extra></extra>",
+        hovertemplate=f"<b>{yr_cur}</b> %{{x}}<br>%{{customdata}}<extra></extra>",
     ))
     # Δ% annotations
     for i, (a, b) in enumerate(zip(q25, q24)):
@@ -799,7 +952,8 @@ def _dd_quarterly_chart(v25, v24, currency, is_pct) -> None:
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
-def _dd_month_table(v25, v24, labels, currency, is_pct) -> None:
+def _dd_month_table(v25, v24, labels, currency, is_pct,
+                    yr_cur: str = "2025", yr_prev: str = "2024") -> None:
     """Month-by-month detail table."""
     f = lambda v: _dd_fmt(v, is_pct, currency)
     has24 = any(abs(v) > 0.01 for v in v24)
@@ -822,8 +976,8 @@ def _dd_month_table(v25, v24, labels, currency, is_pct) -> None:
         )
     st.markdown(
         '<table class="eerr" style="font-size:12px"><thead><tr>'
-        '<th>Mes</th><th style="text-align:right">2025</th>'
-        '<th style="text-align:right;color:#94A3B8">2024</th>'
+        f'<th>Mes</th><th style="text-align:right">{yr_cur}</th>'
+        f'<th style="text-align:right;color:#94A3B8">{yr_prev}</th>'
         '<th style="text-align:right">Δ Abs</th>'
         '<th style="text-align:right">Δ %</th>'
         f'</tr></thead><tbody>{"".join(rows)}</tbody></table>',
@@ -831,8 +985,9 @@ def _dd_month_table(v25, v24, labels, currency, is_pct) -> None:
     )
 
 
-def _dd_sublíneas_chart(df25, df24, code_s, v25, avail, currency, is_pct) -> None:
-    """Horizontal bar chart of children lines, with 2024 comparison."""
+def _dd_sublíneas_chart(df25, df24, code_s, v25, avail, currency, is_pct,
+                        yr_cur: str = "2025", yr_prev: str = "2024") -> None:
+    """Horizontal bar chart of children lines with prior-year comparison."""
     try:
         ci = int(code_s)
         prefix = ci // 100
@@ -858,22 +1013,22 @@ def _dd_sublíneas_chart(df25, df24, code_s, v25, avail, currency, is_pct) -> No
         f = lambda v: _dd_fmt(v, is_pct, currency)
         fig = go.Figure()
         fig.add_trace(go.Bar(
-            name="2024", y=names, x=vals24, orientation="h",
+            name=yr_prev, y=names, x=vals24, orientation="h",
             marker=dict(color=CP, line=dict(width=0), cornerradius=4),
             customdata=[f(v) for v in vals24],
-            hovertemplate="<b>2024</b> %{y}<br>%{customdata}<extra></extra>",
+            hovertemplate=f"<b>{yr_prev}</b> %{{y}}<br>%{{customdata}}<extra></extra>",
         ))
         fig.add_trace(go.Bar(
-            name="2025", y=names, x=vals25, orientation="h",
+            name=yr_cur, y=names, x=vals25, orientation="h",
             marker=dict(color=CL, line=dict(width=0), cornerradius=4, opacity=0.9),
             text=[f(v) for v in vals25], textposition="outside",
             textfont=dict(size=10, color=CN),
             customdata=[f(v) for v in vals25],
-            hovertemplate="<b>2025</b> %{y}<br>%{customdata}<extra></extra>",
+            hovertemplate=f"<b>{yr_cur}</b> %{{y}}<br>%{{customdata}}<extra></extra>",
         ))
         fig.update_layout(
             **_PB, barmode="overlay", height=max(180, len(names) * 58),
-            title=dict(text="<b>Sublíneas — anual 2024 vs 2025</b>",
+            title=dict(text=f"<b>Sublíneas — anual {yr_prev} vs {yr_cur}</b>",
                        font=dict(size=13, color=CN), x=0, xanchor="left"),
             xaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,.04)",
                        showticklabels=False, showline=False, zeroline=False),
@@ -897,7 +1052,8 @@ def _drilldown(df25, df24, code_s, name_s, currency) -> None:
 
 
 # ── AI Insight ────────────────────────────────────────────────────
-def _ai_insight(kpis: list, top_vars, currency: str, period_label: str) -> None:
+def _ai_insight(kpis: list, top_vars, currency: str, period_label: str,
+                yr_prev: str = "2024") -> None:
     """Renders an AI-style narrative insight paragraph."""
     kpi_map = {k["key"]: k for k in kpis if k["found"]}
 
@@ -924,7 +1080,7 @@ def _ai_insight(kpis: list, top_vars, currency: str, period_label: str) -> None:
                 else "moderado")
         sentences.append(
             f"En <b>{period_label}</b>, las Ventas alcanzaron <b>{v_s}</b> "
-            f"(<b>{dp_ventas:+.1f}%</b> vs. 2024), evidenciando un {adj} {dir_} de ingresos."
+            f"(<b>{dp_ventas:+.1f}%</b> vs. {yr_prev}), evidenciando un {adj} {dir_} de ingresos."
         )
 
     # ── EBITDA / margen ───────────────────────────────────────────
@@ -944,7 +1100,7 @@ def _ai_insight(kpis: list, top_vars, currency: str, period_label: str) -> None:
         else:
             sentences.append(
                 f"El EBITDA llegó a <b>{e_s}</b> con un margen de <b>{m_s}</b>, "
-                f"manteniendo la rentabilidad operativa en línea con 2024."
+                f"manteniendo la rentabilidad operativa en línea con {yr_prev}."
             )
 
     # ── Top driver ────────────────────────────────────────────────
@@ -977,7 +1133,7 @@ def _ai_insight(kpis: list, top_vars, currency: str, period_label: str) -> None:
         u_s = fmt_currency(v_un, currency, compact=True)
         m_s = fmt_percent(v_mn)
         calidad = "favorable" if v_un > 0 else "negativo"
-        dp_u_s = f" ({dp_un:+.1f}% vs. 2024)" if dp_un is not None else ""
+        dp_u_s = f" ({dp_un:+.1f}% vs. {yr_prev})" if dp_un is not None else ""
         sentences.append(
             f"La Utilidad Neta de <b>{u_s}</b>{dp_u_s} con margen <b>{m_s}</b> "
             f"consolida un resultado <b>{calidad}</b> para el período analizado."
@@ -997,7 +1153,7 @@ def _ai_insight(kpis: list, top_vars, currency: str, period_label: str) -> None:
 
 
 # ── Validate ──────────────────────────────────────────────────────
-def _validate(df25, df24, period_cols) -> dict:
+def _validate(df25, df24, period_cols, yr_prev: str = "2024") -> dict:
     checks = []
     pcols  = [c for c in period_cols if c in df25.columns]
     nan_n  = int(df25[pcols].isna().sum().sum()) if pcols else 0
@@ -1012,8 +1168,8 @@ def _validate(df25, df24, period_cols) -> dict:
     months = [c for c in period_cols if c.startswith("month_")]
     checks.append({"label": "Columnas mensuales", "passed": bool(months),
                    "detail": f"{len(months)} mes(es)" if months else "Ninguno"})
-    checks.append({"label": "Datos 2024 disponibles", "passed": df24 is not None,
-                   "detail": "OK" if df24 is not None else "Sin datos 2024"})
+    checks.append({"label": f"Datos {yr_prev} disponibles", "passed": df24 is not None,
+                   "detail": "OK" if df24 is not None else f"Sin datos {yr_prev}"})
     checks.append({"label": "Mínimo de líneas (≥5)", "passed": len(df25) >= 5,
                    "detail": f"{len(df25)} líneas"})
     n_sub = int(df25.get("is_subtotal", pd.Series([False] * len(df25))).sum())
@@ -1034,17 +1190,182 @@ def _init() -> None:
 
 
 # ════════════════════════════════════════════════════════════════
+# UPLOAD TAB
+# ════════════════════════════════════════════════════════════════
+
+def _render_upload_tab(username: str) -> None:
+    """Render the 'Cargar EERR' tab with deduplication logic."""
+    uploads = storage.list_uploads(username)
+
+    # ── Historial de cargas ───────────────────────────────────────
+    with st.container(border=True):
+        st.markdown('<div class="sec-hdr">📁 Historial de cargas</div>',
+                    unsafe_allow_html=True)
+        if not uploads:
+            st.info("Aún no hay estados de resultados cargados para este usuario.")
+        else:
+            rows = "".join(
+                f'<tr>'
+                f'<td style="font-weight:600">{_MONTHS_ES[u["month"]-1]} {u["year"]}</td>'
+                f'<td style="color:#64748B;font-size:12px">'
+                f'{u["uploaded_at"][:16].replace("T", " ")}</td>'
+                f'<td><span style="background:#DCFCE7;color:#15803D;'
+                f'border-radius:20px;padding:2px 10px;font-size:11px;font-weight:700">'
+                f'✓ Cargado</span></td>'
+                f'</tr>'
+                for u in uploads
+            )
+            st.markdown(
+                '<table class="eerr" style="font-size:13px"><thead><tr>'
+                '<th>Período</th><th>Fecha de carga</th><th>Estado</th>'
+                f'</tr></thead><tbody>{rows}</tbody></table>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    # ── Formulario de nueva carga ─────────────────────────────────
+    with st.container(border=True):
+        st.markdown('<div class="sec-hdr">⬆️ Nueva carga</div>',
+                    unsafe_allow_html=True)
+        col_m, col_y, col_f = st.columns([2, 1, 3])
+        with col_m:
+            sel_month_name = st.selectbox("Mes", _MONTHS_ES, key="up_month")
+            sel_month = _MONTHS_ES.index(sel_month_name) + 1
+        with col_y:
+            sel_year = st.number_input(
+                "Año", min_value=2020, max_value=2030,
+                value=_dt.date.today().year, step=1, key="up_year",
+            )
+        with col_f:
+            uploaded_file = st.file_uploader(
+                "Archivo Excel (.xlsx)", type=["xlsx", "xls"], key="up_file",
+            )
+
+        already = storage.upload_exists(username, int(sel_year), sel_month)
+        if already:
+            st.warning(
+                f"Ya existe un EERR cargado para "
+                f"**{sel_month_name} {sel_year}**. "
+                f"No se puede volver a subir el mismo período."
+            )
+
+        btn = st.button(
+            "Guardar EERR",
+            type="primary",
+            disabled=(uploaded_file is None or already),
+            key="up_submit",
+        )
+
+        if btn and uploaded_file is not None and not already:
+            with st.spinner("Procesando archivo…"):
+                try:
+                    # Detectar formato: Guantex o genérico
+                    uploaded_file.seek(0)
+                    if is_guantex_format(uploaded_file):
+                        uploaded_file.seek(0)
+                        parser = GuantexParser()
+                        raw = parser.load(uploaded_file)
+                        fmt_label = "Guantex"
+                    else:
+                        uploaded_file.seek(0)
+                        parser = EERRParser()
+                        raw = parser.load(uploaded_file)
+                        fmt_label = "genérico"
+
+                    if parser.warnings:
+                        for w in parser.warnings:
+                            st.warning(w)
+                    storage.save_upload(username, int(sel_year), sel_month, raw)
+                    # Limpiar caché y estado para que el dashboard recargue el nuevo archivo
+                    _load.clear()
+                    for _k in ["sb_upload", "sb_currency", "sb_period",
+                               "sb_sociedad", "_go_upload"]:
+                        st.session_state.pop(_k, None)
+                    st.success(
+                        f"✅ EERR {fmt_label} de **{sel_month_name} {sel_year}** guardado correctamente."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Error procesando el archivo: {exc}")
+
+
+# ════════════════════════════════════════════════════════════════
 # MAIN
 # ════════════════════════════════════════════════════════════════
+def _render_no_data_screen(username: str) -> None:
+    """Pantalla inicial cuando el usuario no tiene ERRRs cargados."""
+    _b64 = _logo_b64()
+    _logo_html = (
+        f'<img src="data:image/png;base64,{_b64}" style="height:52px;width:auto" />'
+        if _b64 else
+        '<div style="font-size:22px;font-weight:900;color:#0F1F4A;letter-spacing:3px">ASCENT</div>'
+    )
+    dname = auth.display_name(username)
+    st.markdown(f"""
+    <div style="max-width:520px;margin:80px auto 0;text-align:center;">
+      {_logo_html}
+      <h2 style="font-size:22px;font-weight:800;color:{CN};margin:24px 0 8px;">
+        Bienvenido, {dname}
+      </h2>
+      <p style="color:{CMU};font-size:15px;margin:0 0 32px;">
+        Todavía no cargaste ningún Estado de Resultados.<br>
+        Subí tu primer archivo para comenzar el análisis.
+      </p>
+    </div>
+    """, unsafe_allow_html=True)
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        if st.button("📁  Cargar mi primer EERR", type="primary", use_container_width=True):
+            st.session_state["_go_upload"] = True
+            st.rerun()
+    # Si se hizo click en el botón, mostramos el formulario de carga directamente
+    if st.session_state.get("_go_upload"):
+        st.markdown("---")
+        _render_upload_tab(username)
+
+
 def main() -> None:
+    # ── Auth gate ────────────────────────────────────────────────
+    if not auth.is_authenticated():
+        auth.render_login()
+        return
+
     _init()
-    data = _load()
+    username = auth.current_user()
+    uploads  = storage.list_uploads(username)
 
-    # ── Sidebar (currency, period, alerts) ──────────────────────
-    currency, sel_key, sel_label, top_n, alert_mode = _sidebar(data)
+    # ── Sin datos: pantalla de bienvenida ────────────────────────
+    if not uploads:
+        _render_no_data_screen(username)
+        return
 
-    df25_c = data[currency].get("2025")
-    df24_c = data[currency].get("2024")
+    # ── Selección de archivo EERR (via session_state del widget) ─
+    # El selectbox "sb_upload" se renderiza en _sidebar; leemos aquí
+    # su valor para saber qué cargar antes de renderizar el resto.
+    _ul_map = {
+        f"{_MONTHS_ES[u['month']-1]} {u['year']}": u
+        for u in reversed(uploads)
+    }
+    _default_label = list(_ul_map.keys())[0]
+    _sel_label     = st.session_state.get("sb_upload", _default_label)
+    _sel_upload    = _ul_map.get(_sel_label, list(_ul_map.values())[0])
+
+    data = _load(username, _sel_upload["year"], _sel_upload["month"])
+    if data is None:
+        st.error("No se pudo cargar el EERR seleccionado.")
+        return
+
+    # ── Sidebar (currency, period, alerts, sociedad) ─────────────
+    currency, sel_key, sel_label, top_n, alert_mode, sociedad = _sidebar(data, uploads)
+
+    # ── Dynamic year detection ────────────────────────────────────
+    avail_years = sorted(data.get(currency, {}).keys())
+    yr_cur  = avail_years[-1] if avail_years else "2025"
+    yr_prev = avail_years[-2] if len(avail_years) > 1 else str(int(yr_cur) - 1)
+
+    df25_c = data[currency].get(yr_cur)
+    df24_c = data[currency].get(yr_prev)
 
     if df25_c is None or sel_key is None:
         st.error("Error cargando datos.")
@@ -1053,9 +1374,10 @@ def main() -> None:
     # ── Header ───────────────────────────────────────────────────
     _header(sel_label, currency)
 
-    # ── Prepare DataFrames ───────────────────────────────────────
-    df25 = df25_c.copy()
-    df24 = df24_c.copy() if df24_c is not None else None
+    # ── Prepare DataFrames (con filtro de sociedad) ───────────────
+    df25 = _filter_sociedad(df25_c.copy(), sociedad) if sociedad else df25_c.copy()
+    df24 = (_filter_sociedad(df24_c.copy(), sociedad) if sociedad else df24_c.copy()) \
+           if df24_c is not None else None
 
     if sel_key.startswith("ytd_"):
         m_num = int(sel_key.split("_")[1])
@@ -1073,13 +1395,14 @@ def main() -> None:
     period_cols_all = get_period_columns(df25)
 
     # ── Tabs ─────────────────────────────────────────────────────
-    t1, t2, t3, t4, t5, t6 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7 = st.tabs([
         "📋  Resumen ejecutivo",
         "📊  EERR",
         "🔍  Drilldown",
         "✅  Checklist",
         "🗺️  Mapping Studio",
         "📤  Exportar",
+        "📁  Cargar EERR",
     ])
 
     # ── TAB 1: RESUMEN ───────────────────────────────────────────
@@ -1090,14 +1413,17 @@ def main() -> None:
         col_a, col_b = st.columns([3, 2], gap="large")
         with col_a:
             with st.container(border=True):
-                _chart_comparativo(kpis, currency)
+                _chart_comparativo(kpis, currency, yr_cur, yr_prev)
         with col_b:
             with st.container(border=True):
-                _chart_waterfall(kpis, currency)
+                _chart_waterfall(kpis, currency, yr_prev)
 
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         with st.container(border=True):
-            st.markdown('<div class="sec-hdr">🚨 Top Variaciones vs 2024</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="sec-hdr">🚨 Top Variaciones vs {yr_prev}</div>',
+                unsafe_allow_html=True,
+            )
             if df24 is None or actual_col not in df24.columns:
                 st.info("Sin datos comparativos para este período.")
             else:
@@ -1109,7 +1435,7 @@ def main() -> None:
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         _ai_insight(kpis,
                     top_vars if (df24 is not None and actual_col in df24.columns) else None,
-                    currency, sel_label)
+                    currency, sel_label, yr_prev)
 
     # ── TAB 2: EERR ──────────────────────────────────────────────
     with t2:
@@ -1119,7 +1445,7 @@ def main() -> None:
         with c3:
             st.caption(f"{len(df25)} líneas")
         with st.container(border=True):
-            _table(df25, df24, actual_col, currency, only_sub)
+            _table(df25, df24, actual_col, currency, only_sub, yr_cur, yr_prev)
 
     # ── TAB 3: DRILLDOWN ─────────────────────────────────────────
     with t3:
@@ -1138,33 +1464,36 @@ def main() -> None:
                 v25_dd, v24_dd, labels_dd = dd
 
                 # ── Stats chips ───────────────────────────────────
-                _dd_stats(v25_dd, v24_dd, currency, is_pct_dd)
+                _dd_stats(v25_dd, v24_dd, currency, is_pct_dd, yr_cur, yr_prev)
 
                 # ── Monthly evolution chart ───────────────────────
                 with st.container(border=True):
-                    _dd_monthly_chart(v25_dd, v24_dd, labels_dd, sn, currency, is_pct_dd)
+                    _dd_monthly_chart(v25_dd, v24_dd, labels_dd, sn, currency,
+                                      is_pct_dd, yr_cur, yr_prev)
 
                 # ── Quarterly + month table ───────────────────────
                 col_q, col_t = st.columns([3, 2], gap="large")
                 with col_q:
                     with st.container(border=True):
-                        _dd_quarterly_chart(v25_dd, v24_dd, currency, is_pct_dd)
+                        _dd_quarterly_chart(v25_dd, v24_dd, currency, is_pct_dd,
+                                            yr_cur, yr_prev)
                 with col_t:
                     with st.container(border=True):
                         st.markdown('<div class="sec-hdr">Detalle mensual</div>',
                                     unsafe_allow_html=True)
-                        _dd_month_table(v25_dd, v24_dd, labels_dd, currency, is_pct_dd)
+                        _dd_month_table(v25_dd, v24_dd, labels_dd, currency,
+                                        is_pct_dd, yr_cur, yr_prev)
 
                 # ── Sublíneas horizontal chart ────────────────────
                 avail_dd = [c for c in [f"month_{m:02d}" for m in range(1, 13)]
                             if c in df25.columns]
                 with st.container(border=True):
                     _dd_sublíneas_chart(df25, df24, sc, v25_dd, avail_dd,
-                                        currency, is_pct_dd)
+                                        currency, is_pct_dd, yr_cur, yr_prev)
 
     # ── TAB 4: CHECKLIST ─────────────────────────────────────────
     with t4:
-        val = _validate(df25, df24, period_cols_all)
+        val = _validate(df25, df24, period_cols_all, yr_prev)
         if val["all_passed"]:
             st.success(f"✅ **{val['status']}**")
         else:
@@ -1254,6 +1583,10 @@ def main() -> None:
             st.markdown('<div class="sec-hdr">📊 Export PPT</div>', unsafe_allow_html=True)
             st.info("🚧 En desarrollo · 3 slides: Resumen · EERR · Top variaciones")
             st.button("📑 Generar PPT", disabled=True)
+
+    # ── TAB 7: CARGAR EERR ───────────────────────────────────────
+    with t7:
+        _render_upload_tab(username)
 
 
 if __name__ == "__main__":
