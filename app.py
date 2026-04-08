@@ -1351,8 +1351,8 @@ def _render_chat_tab(
 ) -> None:
     """Renderiza el tab de chat con el analista IA."""
 
-    # ── API key ──────────────────────────────────────────────────
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    # ── API key (st.secrets → env var → ingreso manual) ──────────
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         api_key = st.session_state.get("_chat_api_key", "")
 
