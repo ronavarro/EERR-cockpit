@@ -20,37 +20,22 @@ PROVIDERS = {
         "env_key": "ANTHROPIC_API_KEY",
     },
     "groq": {
-        "label": "Groq (LLaMA · gratis)",
-        # llama-3.1-8b-instant: 131k TPM en free tier vs 12k de llama-3.3-70b
-        "model": "llama-3.1-8b-instant",
+        "label": "Groq (LLaMA 3.3 · gratis)",
+        "model": "llama-3.3-70b-versatile",
         "env_key": "GROQ_API_KEY",
     },
 }
 
-# Máximo de columnas de período a incluir en el contexto (para no exceder TPM)
-_MAX_PERIOD_COLS = 7
+# Máximo de columnas de período a incluir en el contexto
+_MAX_PERIOD_COLS = 3
 
 # ── System prompt ────────────────────────────────────────────────────
 _SYSTEM = """\
-Sos un analista financiero experto en Estados de Resultados (EERR), \
-especializado en ayudar a usuarios no técnicos a entender sus resultados empresariales.
-
-Tu tarea es responder preguntas sobre el Estado de Resultados de la empresa \
-usando los datos reales que se te proveen en el contexto.
-
-Reglas:
-- Respondé siempre en español rioplatense (Argentina).
-- Usá lenguaje claro, simple y directo — evitá jerga técnica innecesaria.
-- Cuando des cifras, usá formato latinoamericano: punto para miles, coma para decimales \
-  (ej: $1.234.567,89).
-- Cuando hagas comparaciones MoM o YoY, señalá si la variación es positiva o negativa \
-  con palabras claras ("creció", "cayó", "se mantuvo estable").
-- Si la pregunta requiere datos que no están en el contexto, decilo honestamente.
-- Sé conciso: respondé lo que se pregunta sin agregar análisis no solicitados, \
-  a menos que sean muy relevantes.
-- No inventes cifras. Solo usá los datos del contexto.
-- Si detectás algo llamativo en los datos (caída brusca, crecimiento inusual), \
-  podés mencionarlo brevemente al final como "Dato destacado".
+Sos un analista financiero experto en EERR. Ayudás a usuarios no técnicos.
+Respondé en español rioplatense, de forma clara y concisa.
+Usá formato numérico latinoamericano (punto miles, coma decimal).
+Solo usá los datos del contexto. No inventes cifras.
+Si algo es llamativo, mencionalo brevemente al final.
 """
 
 
@@ -136,6 +121,11 @@ def _trim_period_cols(all_cols: list[str], max_cols: int = _MAX_PERIOD_COLS) -> 
 
 
 def _df_to_table(df: pd.DataFrame, period_cols: list[str], year_label: str) -> list[str]:
+    """
+    Genera la tabla del EERR.
+    Incluye TODAS las filas con al menos un valor no cero,
+    omitiendo filas completamente vacías para reducir tokens.
+    """
     col_labels = [_col_label(c) for c in period_cols]
     lines = [
         f"### Datos {year_label}",
@@ -147,12 +137,17 @@ def _df_to_table(df: pd.DataFrame, period_cols: list[str], year_label: str) -> l
         if not name:
             continue
         vals = []
+        row_total = 0.0
         for c in period_cols:
             v = row.get(c, 0)
             try:
-                vals.append(_fmt(float(v)))
+                fv = float(v)
+                row_total += abs(fv)
+                vals.append(_fmt(fv))
             except Exception:
                 vals.append("–")
+        if row_total == 0:
+            continue
         lines.append(f"| {name} | " + " | ".join(vals) + " |")
     return lines
 
@@ -213,7 +208,7 @@ def _stream_groq(messages: list[dict], system: str, api_key: str) -> Iterator[st
     stream = client.chat.completions.create(
         model=PROVIDERS["groq"]["model"],
         messages=all_msgs,
-        max_tokens=1024,
+        max_tokens=600,   # reducido para respetar TPM del free tier
         stream=True,
     )
     for chunk in stream:
