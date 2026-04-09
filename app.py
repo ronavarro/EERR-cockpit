@@ -1495,22 +1495,31 @@ def _render_chat_tab(
             # Stream de respuesta
             with st.chat_message("assistant"):
                 response_chunks: list[str] = []
+                error_msg: list[str] = []
 
                 def _gen():
-                    for chunk in stream_response(
-                        st.session_state[hist_key],
-                        eerr_context,
-                        api_key,
-                        provider=provider,
-                    ):
-                        response_chunks.append(chunk)
-                        yield chunk
+                    try:
+                        for chunk in stream_response(
+                            st.session_state[hist_key],
+                            eerr_context,
+                            api_key,
+                            provider=provider,
+                        ):
+                            response_chunks.append(chunk)
+                            yield chunk
+                    except Exception as exc:
+                        error_msg.append(str(exc))
+                        yield f"\n\n⚠️ Error: {exc}"
 
                 st.write_stream(_gen())
 
-            st.session_state[hist_key].append(
-                {"role": "assistant", "content": "".join(response_chunks)}
-            )
+            if error_msg:
+                st.error(f"Error del modelo: {error_msg[0]}")
+
+            if response_chunks:
+                st.session_state[hist_key].append(
+                    {"role": "assistant", "content": "".join(response_chunks)}
+                )
 
 
 def main() -> None:
