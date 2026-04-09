@@ -8,3 +8,4 @@ venv/
 !eerr_sample.xlsx
 .DS_Store
 .claude/
+.streamlit/secrets.toml

@@ -5,6 +5,7 @@ streamlit run app.py
 from __future__ import annotations
 import base64
 import datetime as _dt
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +14,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from eerr_cockpit import auth, storage
+from eerr_cockpit.agent import build_context, stream_response
 from eerr_cockpit.config import KPI_DEFINITIONS, MONTH_LABELS_ES, QUARTER_LABELS_ES
 from eerr_cockpit.guantex_parser import GuantexParser, is_guantex_format
 from eerr_cockpit.hierarchy import detect_hierarchy, get_period_columns
@@ -1325,6 +1327,192 @@ def _render_no_data_screen(username: str) -> None:
         _render_upload_tab(username)
 
 
+# ════════════════════════════════════════════════════════════════
+# CHAT / ANALISTA IA
+# ════════════════════════════════════════════════════════════════
+
+_QUICK_PROMPTS = [
+    "¿Cómo vienen las ventas MoM en los últimos meses?",
+    "¿Cuál es la tendencia del EBITDA?",
+    "¿Qué línea de costos creció más en el período?",
+    "Comparame las ventas de este año vs el año anterior.",
+    "¿Cuál es el margen neto actual y cómo evolucionó?",
+    "Dame un resumen ejecutivo del EERR en pocas palabras.",
+]
+
+
+def _get_api_key(provider: str) -> str:
+    """Lee la API key del provider desde st.secrets → env var → session_state."""
+    from eerr_cockpit.agent import PROVIDERS
+    env_key = PROVIDERS[provider]["env_key"]
+    return (
+        st.secrets.get(env_key, "")
+        or os.environ.get(env_key, "")
+        or st.session_state.get(f"_chat_api_key_{provider}", "")
+    )
+
+
+def _render_chat_tab(
+    df25: pd.DataFrame,
+    df24,
+    currency: str,
+    yr_cur: str,
+    yr_prev: str,
+    sel_label: str,
+) -> None:
+    """Renderiza el tab de chat con el analista IA."""
+    from eerr_cockpit.agent import PROVIDERS
+
+    provider = "groq"
+
+    # ── API key ──────────────────────────────────────────────────
+    api_key = _get_api_key(provider)
+
+    if not api_key:
+        prov_info = PROVIDERS[provider]
+        placeholder = "gsk_..." if provider == "groq" else "sk-ant-..."
+        st.warning(
+            f"Para usar **{prov_info['label']}** necesitás una API key. "
+            f"Obtené una gratis en {'console.groq.com' if provider == 'groq' else 'console.anthropic.com'} "
+            f"e ingresala acá, o agregala en `.streamlit/secrets.toml` como `{prov_info['env_key']}`."
+        )
+        col_k, col_b = st.columns([3, 1])
+        with col_k:
+            key_input = st.text_input(
+                f"API Key ({prov_info['label']})",
+                type="password",
+                placeholder=placeholder,
+                key=f"_chat_key_input_{provider}",
+                label_visibility="collapsed",
+            )
+        with col_b:
+            if st.button("Confirmar", type="primary", key=f"_chat_key_btn_{provider}"):
+                if key_input.strip():
+                    st.session_state[f"_chat_api_key_{provider}"] = key_input.strip()
+                    st.rerun()
+                else:
+                    st.error("Ingresá una key válida.")
+        return
+
+    # ── Contexto EERR ────────────────────────────────────────────
+    ctx_key = f"_chat_ctx_{currency}_{yr_cur}_{sel_label}"
+    if ctx_key not in st.session_state:
+        st.session_state[ctx_key] = build_context(
+            df25, df24, currency, yr_cur, yr_prev, sel_label
+        )
+    eerr_context = st.session_state[ctx_key]
+
+    # ── Historial (por provider para no mezclar conversaciones) ──
+    hist_key = f"chat_messages_{provider}"
+    if hist_key not in st.session_state:
+        st.session_state[hist_key] = []
+
+    # ── Prompt a procesar (viene de quick-prompt o de chat_input) ─
+    # Se guarda antes de renderizar para no depender del rerun.
+    pending_prompt: str | None = st.session_state.pop("_chat_prompt", None)
+
+    # ── Layout ──────────────────────────────────────────────────
+    col_chat, col_info = st.columns([3, 1])
+
+    with col_info:
+        prov_cfg = PROVIDERS[provider]
+        st.markdown(
+            f"""
+            <div style="background:#EEF2FA;border:1px solid #D1DDEF;border-radius:14px;
+                        padding:18px 16px;font-size:12px;color:#334155;line-height:1.7">
+                <div style="font-weight:700;color:#0F1F4A;margin-bottom:8px">📊 Contexto activo</div>
+                <b>Período:</b> {sel_label}<br>
+                <b>Moneda:</b> {currency}<br>
+                <b>Año actual:</b> {yr_cur}<br>
+                <b>Año anterior:</b> {yr_prev}<br>
+                <b>Líneas cargadas:</b> {len(df25)}<br>
+                <b>Modelo:</b> {prov_cfg['model']}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+        if st.button("🗑️ Limpiar chat", use_container_width=True, key="_chat_clear"):
+            st.session_state[hist_key] = []
+            st.rerun()
+
+        st.markdown(
+            '<div style="font-size:11px;color:#64748B;margin-top:14px;line-height:1.6">'
+            "💡 <b>Preguntas sugeridas:</b>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        for qp in _QUICK_PROMPTS:
+            if st.button(qp, use_container_width=True, key=f"qp_{qp[:20]}"):
+                st.session_state["_chat_prompt"] = qp
+                st.rerun()
+
+    with col_chat:
+        # ── Mostrar historial ─────────────────────────────────────
+        if not st.session_state[hist_key] and not pending_prompt:
+            st.markdown(
+                f"""
+                <div style="text-align:center;padding:48px 24px;color:#64748B">
+                    <div style="font-size:40px;margin-bottom:12px">💬</div>
+                    <div style="font-size:16px;font-weight:700;color:#0F1F4A;margin-bottom:8px">
+                        Analista IA
+                    </div>
+                    <div style="font-size:13px;line-height:1.7">
+                        Preguntame lo que quieras sobre el EERR de <b>{sel_label}</b>.<br>
+                        Podés usar las preguntas sugeridas de la derecha<br>
+                        o escribir la tuya propia.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            for msg in st.session_state[hist_key]:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+        # ── Input del usuario ─────────────────────────────────────
+        user_input = st.chat_input("Preguntá sobre el EERR…")
+        prompt = user_input or pending_prompt
+
+        # ── Generar respuesta ─────────────────────────────────────
+        if prompt:
+            # Mostrar mensaje del usuario inmediatamente
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            st.session_state[hist_key].append({"role": "user", "content": prompt})
+
+            # Stream de respuesta
+            with st.chat_message("assistant"):
+                response_chunks: list[str] = []
+                error_msg: list[str] = []
+
+                def _gen():
+                    try:
+                        for chunk in stream_response(
+                            st.session_state[hist_key],
+                            eerr_context,
+                            api_key,
+                            provider=provider,
+                        ):
+                            response_chunks.append(chunk)
+                            yield chunk
+                    except Exception as exc:
+                        error_msg.append(str(exc))
+                        yield f"\n\n⚠️ Error: {exc}"
+
+                st.write_stream(_gen())
+
+            if error_msg:
+                st.error(f"Error del modelo: {error_msg[0]}")
+
+            if response_chunks:
+                st.session_state[hist_key].append(
+                    {"role": "assistant", "content": "".join(response_chunks)}
+                )
+
+
 def main() -> None:
     # ── Auth gate ────────────────────────────────────────────────
     if not auth.is_authenticated():
@@ -1395,7 +1583,7 @@ def main() -> None:
     period_cols_all = get_period_columns(df25)
 
     # ── Tabs ─────────────────────────────────────────────────────
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs([
         "📋  Resumen ejecutivo",
         "📊  EERR",
         "🔍  Drilldown",
@@ -1403,6 +1591,7 @@ def main() -> None:
         "🗺️  Mapping Studio",
         "📤  Exportar",
         "📁  Cargar EERR",
+        "💬  Analista IA",
     ])
 
     # ── TAB 1: RESUMEN ───────────────────────────────────────────
@@ -1587,6 +1776,10 @@ def main() -> None:
     # ── TAB 7: CARGAR EERR ───────────────────────────────────────
     with t7:
         _render_upload_tab(username)
+
+    # ── TAB 8: ANALISTA IA ───────────────────────────────────────
+    with t8:
+        _render_chat_tab(df25, df24, currency, yr_cur, yr_prev, sel_label)
 
 
 if __name__ == "__main__":
