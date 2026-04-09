@@ -1416,6 +1416,10 @@ def _render_chat_tab(
     if hist_key not in st.session_state:
         st.session_state[hist_key] = []
 
+    # ── Prompt a procesar (viene de quick-prompt o de chat_input) ─
+    # Se guarda antes de renderizar para no depender del rerun.
+    pending_prompt: str | None = st.session_state.pop("_chat_prompt", None)
+
     # ── Layout ──────────────────────────────────────────────────
     col_chat, col_info = st.columns([3, 1])
 
@@ -1450,12 +1454,12 @@ def _render_chat_tab(
         )
         for qp in _QUICK_PROMPTS:
             if st.button(qp, use_container_width=True, key=f"qp_{qp[:20]}"):
-                st.session_state[hist_key].append({"role": "user", "content": qp})
-                st.session_state["_chat_pending"] = True
+                st.session_state["_chat_prompt"] = qp
                 st.rerun()
 
     with col_chat:
-        if not st.session_state[hist_key]:
+        # ── Mostrar historial ─────────────────────────────────────
+        if not st.session_state[hist_key] and not pending_prompt:
             st.markdown(
                 f"""
                 <div style="text-align:center;padding:48px 24px;color:#64748B">
@@ -1477,15 +1481,18 @@ def _render_chat_tab(
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
+        # ── Input del usuario ─────────────────────────────────────
         user_input = st.chat_input("Preguntá sobre el EERR…")
-        if user_input:
-            st.session_state[hist_key].append({"role": "user", "content": user_input})
-            st.session_state["_chat_pending"] = True
-            st.rerun()
+        prompt = user_input or pending_prompt
 
-        if st.session_state.get("_chat_pending"):
-            st.session_state["_chat_pending"] = False
+        # ── Generar respuesta ─────────────────────────────────────
+        if prompt:
+            # Mostrar mensaje del usuario inmediatamente
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            st.session_state[hist_key].append({"role": "user", "content": prompt})
 
+            # Stream de respuesta
             with st.chat_message("assistant"):
                 response_chunks: list[str] = []
 
