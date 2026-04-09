@@ -20,11 +20,15 @@ PROVIDERS = {
         "env_key": "ANTHROPIC_API_KEY",
     },
     "groq": {
-        "label": "Groq (LLaMA 3.3 · gratis)",
-        "model": "llama-3.3-70b-versatile",
+        "label": "Groq (LLaMA · gratis)",
+        # llama-3.1-8b-instant: 131k TPM en free tier vs 12k de llama-3.3-70b
+        "model": "llama-3.1-8b-instant",
         "env_key": "GROQ_API_KEY",
     },
 }
+
+# Máximo de columnas de período a incluir en el contexto (para no exceder TPM)
+_MAX_PERIOD_COLS = 7
 
 # ── System prompt ────────────────────────────────────────────────────
 _SYSTEM = """\
@@ -86,29 +90,59 @@ def _available_period_cols(df: pd.DataFrame) -> list[str]:
 
 # ── Construcción del contexto ─────────────────────────────────────────
 
-def build_context(
-    df_cur: pd.DataFrame,
-    df_prev: Optional[pd.DataFrame],
-    currency: str,
-    yr_cur: str,
-    yr_prev: str,
-    sel_label: str,
-) -> str:
-    period_cols = _available_period_cols(df_cur)
+def _trim_period_cols(all_cols: list[str], max_cols: int = _MAX_PERIOD_COLS) -> list[str]:
+    """
+    Selecciona los períodos más relevantes para el contexto:
+    - Siempre incluye el año total (year_00) si existe
+    - Luego los últimos meses disponibles hasta completar max_cols
+    - Si sobran slots, agrega trimestres
+    """
+    years    = [c for c in all_cols if c.startswith("year_")]
+    months   = [c for c in all_cols if c.startswith("month_")]
+    quarters = [c for c in all_cols if c.startswith("quarter_")]
 
-    lines: list[str] = []
-    lines.append(f"## Estado de Resultados — Moneda: {currency}")
-    lines.append(f"Período visualizado actualmente: {sel_label}")
-    lines.append(f"Año principal: {yr_cur}  |  Año comparación: {yr_prev}")
-    lines.append("")
+    selected: list[str] = []
+    slots = max_cols
 
+    # Año total primero
+    for y in years:
+        if slots > 0:
+            selected.append(y)
+            slots -= 1
+
+    # Últimos meses (los más recientes)
+    for m in reversed(months):
+        if slots > 0:
+            selected.insert(len(years), m)   # antes de los años ya agregados no, insertamos al frente de meses
+            slots -= 1
+        else:
+            break
+
+    # Si quedan slots, trimestres
+    for q in reversed(quarters):
+        if slots > 0:
+            selected.append(q)
+            slots -= 1
+        else:
+            break
+
+    # Reordenar: meses → trimestres → año
+    def _sort_key(c):
+        if c.startswith("month_"):   return (0, c)
+        if c.startswith("quarter_"): return (1, c)
+        return (2, c)
+
+    return sorted(selected, key=_sort_key)
+
+
+def _df_to_table(df: pd.DataFrame, period_cols: list[str], year_label: str) -> list[str]:
     col_labels = [_col_label(c) for c in period_cols]
-
-    lines.append(f"### Datos {yr_cur}")
-    lines.append("| Línea | " + " | ".join(col_labels) + " |")
-    lines.append("|" + "---|" * (len(col_labels) + 1))
-
-    for _, row in df_cur.iterrows():
+    lines = [
+        f"### Datos {year_label}",
+        "| Línea | " + " | ".join(col_labels) + " |",
+        "|" + "---|" * (len(col_labels) + 1),
+    ]
+    for _, row in df.iterrows():
         name = str(row.get("name", "")).strip()
         if not name:
             continue
@@ -120,33 +154,40 @@ def build_context(
             except Exception:
                 vals.append("–")
         lines.append(f"| {name} | " + " | ".join(vals) + " |")
+    return lines
 
+
+def build_context(
+    df_cur: pd.DataFrame,
+    df_prev: Optional[pd.DataFrame],
+    currency: str,
+    yr_cur: str,
+    yr_prev: str,
+    sel_label: str,
+) -> str:
+    all_cols     = _available_period_cols(df_cur)
+    period_cols  = _trim_period_cols(all_cols, _MAX_PERIOD_COLS)
+
+    lines: list[str] = [
+        f"## Estado de Resultados — Moneda: {currency}",
+        f"Período visualizado actualmente: {sel_label}",
+        f"Año principal: {yr_cur}  |  Año comparación: {yr_prev}",
+        f"(Nota: se muestran los {len(period_cols)} períodos más recientes con datos)",
+        "",
+    ]
+
+    lines += _df_to_table(df_cur, period_cols, yr_cur)
     lines.append("")
 
     if df_prev is not None:
-        prev_cols = _available_period_cols(df_prev)
-        common    = [c for c in period_cols if c in prev_cols]
-        if common:
-            col_labels_prev = [_col_label(c) for c in common]
-            lines.append(f"### Datos {yr_prev}")
-            lines.append("| Línea | " + " | ".join(col_labels_prev) + " |")
-            lines.append("|" + "---|" * (len(col_labels_prev) + 1))
-            for _, row in df_prev.iterrows():
-                name = str(row.get("name", "")).strip()
-                if not name:
-                    continue
-                vals = []
-                for c in common:
-                    v = row.get(c, 0)
-                    try:
-                        vals.append(_fmt(float(v)))
-                    except Exception:
-                        vals.append("–")
-                lines.append(f"| {name} | " + " | ".join(vals) + " |")
+        prev_cols    = _available_period_cols(df_prev)
+        common       = [c for c in period_cols if c in prev_cols]
+        common_trim  = _trim_period_cols(common, _MAX_PERIOD_COLS)
+        if common_trim:
+            lines += _df_to_table(df_prev, common_trim, yr_prev)
             lines.append("")
 
-    lines.append("---")
-    lines.append("Usá estos datos para responder las preguntas del usuario.")
+    lines += ["---", "Usá estos datos para responder las preguntas del usuario."]
     return "\n".join(lines)
 
 
