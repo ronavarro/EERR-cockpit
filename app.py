@@ -1341,6 +1341,17 @@ _QUICK_PROMPTS = [
 ]
 
 
+def _get_api_key(provider: str) -> str:
+    """Lee la API key del provider desde st.secrets → env var → session_state."""
+    from eerr_cockpit.agent import PROVIDERS
+    env_key = PROVIDERS[provider]["env_key"]
+    return (
+        st.secrets.get(env_key, "")
+        or os.environ.get(env_key, "")
+        or st.session_state.get(f"_chat_api_key_{provider}", "")
+    )
+
+
 def _render_chat_tab(
     df25: pd.DataFrame,
     df24,
@@ -1350,36 +1361,49 @@ def _render_chat_tab(
     sel_label: str,
 ) -> None:
     """Renderiza el tab de chat con el analista IA."""
+    from eerr_cockpit.agent import PROVIDERS
 
-    # ── API key (st.secrets → env var → ingreso manual) ──────────
-    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        api_key = st.session_state.get("_chat_api_key", "")
+    # ── Selector de provider ──────────────────────────────────────
+    provider_options = {v["label"]: k for k, v in PROVIDERS.items()}
+    provider_label = st.radio(
+        "Modelo",
+        list(provider_options.keys()),
+        horizontal=True,
+        key="_chat_provider",
+        index=1,  # Groq por defecto
+    )
+    provider = provider_options[provider_label]
+
+    # ── API key ──────────────────────────────────────────────────
+    api_key = _get_api_key(provider)
 
     if not api_key:
-        st.markdown(
-            '<div style="max-width:480px;margin:32px auto 0">', unsafe_allow_html=True
-        )
+        prov_info = PROVIDERS[provider]
+        placeholder = "gsk_..." if provider == "groq" else "sk-ant-..."
         st.warning(
-            "Para usar el Analista IA necesitás una API key de Anthropic. "
-            "Ingresala a continuación o seteá la variable de entorno `ANTHROPIC_API_KEY`."
+            f"Para usar **{prov_info['label']}** necesitás una API key. "
+            f"Obtené una gratis en {'console.groq.com' if provider == 'groq' else 'console.anthropic.com'} "
+            f"e ingresala acá, o agregala en `.streamlit/secrets.toml` como `{prov_info['env_key']}`."
         )
-        key_input = st.text_input(
-            "API Key de Anthropic",
-            type="password",
-            placeholder="sk-ant-...",
-            key="_chat_api_key_input",
-        )
-        if st.button("Confirmar", type="primary"):
-            if key_input.strip():
-                st.session_state["_chat_api_key"] = key_input.strip()
-                st.rerun()
-            else:
-                st.error("Ingresá una API key válida.")
-        st.markdown("</div>", unsafe_allow_html=True)
+        col_k, col_b = st.columns([3, 1])
+        with col_k:
+            key_input = st.text_input(
+                f"API Key ({prov_info['label']})",
+                type="password",
+                placeholder=placeholder,
+                key=f"_chat_key_input_{provider}",
+                label_visibility="collapsed",
+            )
+        with col_b:
+            if st.button("Confirmar", type="primary", key=f"_chat_key_btn_{provider}"):
+                if key_input.strip():
+                    st.session_state[f"_chat_api_key_{provider}"] = key_input.strip()
+                    st.rerun()
+                else:
+                    st.error("Ingresá una key válida.")
         return
 
-    # ── Contexto EERR (se reconstruye si cambia la selección) ────
+    # ── Contexto EERR ────────────────────────────────────────────
     ctx_key = f"_chat_ctx_{currency}_{yr_cur}_{sel_label}"
     if ctx_key not in st.session_state:
         st.session_state[ctx_key] = build_context(
@@ -1387,14 +1411,16 @@ def _render_chat_tab(
         )
     eerr_context = st.session_state[ctx_key]
 
-    # ── Historial de mensajes ────────────────────────────────────
-    if "chat_messages" not in st.session_state:
-        st.session_state["chat_messages"] = []
+    # ── Historial (por provider para no mezclar conversaciones) ──
+    hist_key = f"chat_messages_{provider}"
+    if hist_key not in st.session_state:
+        st.session_state[hist_key] = []
 
     # ── Layout ──────────────────────────────────────────────────
     col_chat, col_info = st.columns([3, 1])
 
     with col_info:
+        prov_cfg = PROVIDERS[provider]
         st.markdown(
             f"""
             <div style="background:#EEF2FA;border:1px solid #D1DDEF;border-radius:14px;
@@ -1404,16 +1430,16 @@ def _render_chat_tab(
                 <b>Moneda:</b> {currency}<br>
                 <b>Año actual:</b> {yr_cur}<br>
                 <b>Año anterior:</b> {yr_prev}<br>
-                <b>Líneas cargadas:</b> {len(df25)}
+                <b>Líneas cargadas:</b> {len(df25)}<br>
+                <b>Modelo:</b> {prov_cfg['model']}
             </div>
             """,
             unsafe_allow_html=True,
         )
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-        # Botón para limpiar conversación
-        if st.button("🗑️ Limpiar chat", use_container_width=True):
-            st.session_state["chat_messages"] = []
+        if st.button("🗑️ Limpiar chat", use_container_width=True, key="_chat_clear"):
+            st.session_state[hist_key] = []
             st.rerun()
 
         st.markdown(
@@ -1424,15 +1450,12 @@ def _render_chat_tab(
         )
         for qp in _QUICK_PROMPTS:
             if st.button(qp, use_container_width=True, key=f"qp_{qp[:20]}"):
-                st.session_state["chat_messages"].append(
-                    {"role": "user", "content": qp}
-                )
+                st.session_state[hist_key].append({"role": "user", "content": qp})
                 st.session_state["_chat_pending"] = True
                 st.rerun()
 
     with col_chat:
-        # ── Historial ────────────────────────────────────────────
-        if not st.session_state["chat_messages"]:
+        if not st.session_state[hist_key]:
             st.markdown(
                 f"""
                 <div style="text-align:center;padding:48px 24px;color:#64748B">
@@ -1450,20 +1473,16 @@ def _render_chat_tab(
                 unsafe_allow_html=True,
             )
         else:
-            for msg in st.session_state["chat_messages"]:
+            for msg in st.session_state[hist_key]:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
-        # ── Input ────────────────────────────────────────────────
         user_input = st.chat_input("Preguntá sobre el EERR…")
         if user_input:
-            st.session_state["chat_messages"].append(
-                {"role": "user", "content": user_input}
-            )
+            st.session_state[hist_key].append({"role": "user", "content": user_input})
             st.session_state["_chat_pending"] = True
             st.rerun()
 
-        # ── Generar respuesta si hay mensaje pendiente ────────────
         if st.session_state.get("_chat_pending"):
             st.session_state["_chat_pending"] = False
 
@@ -1472,18 +1491,18 @@ def _render_chat_tab(
 
                 def _gen():
                     for chunk in stream_response(
-                        st.session_state["chat_messages"],
+                        st.session_state[hist_key],
                         eerr_context,
                         api_key,
+                        provider=provider,
                     ):
                         response_chunks.append(chunk)
                         yield chunk
 
                 st.write_stream(_gen())
 
-            full_response = "".join(response_chunks)
-            st.session_state["chat_messages"].append(
-                {"role": "assistant", "content": full_response}
+            st.session_state[hist_key].append(
+                {"role": "assistant", "content": "".join(response_chunks)}
             )
 
 

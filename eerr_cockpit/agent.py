@@ -1,7 +1,6 @@
 """
 Agente conversacional para EERR Cockpit.
-Usa el SDK de Anthropic para responder preguntas en lenguaje natural
-sobre el Estado de Resultados cargado por el usuario.
+Soporta Anthropic (claude-opus-4-6) y Groq (llama-3.3-70b) como providers.
 """
 
 from __future__ import annotations
@@ -13,8 +12,19 @@ import pandas as pd
 
 from .config import MONTH_LABELS_ES, QUARTER_LABELS_ES
 
-# ── Modelo ───────────────────────────────────────────────────────────
-_MODEL = "claude-opus-4-6"
+# ── Modelos por provider ─────────────────────────────────────────────
+PROVIDERS = {
+    "anthropic": {
+        "label": "Anthropic (Claude)",
+        "model": "claude-opus-4-6",
+        "env_key": "ANTHROPIC_API_KEY",
+    },
+    "groq": {
+        "label": "Groq (LLaMA 3.3 · gratis)",
+        "model": "llama-3.3-70b-versatile",
+        "env_key": "GROQ_API_KEY",
+    },
+}
 
 # ── System prompt ────────────────────────────────────────────────────
 _SYSTEM = """\
@@ -43,7 +53,6 @@ Reglas:
 # ── Helpers de formato ────────────────────────────────────────────────
 
 def _fmt(v: float) -> str:
-    """Número con punto miles y coma decimal."""
     try:
         s = f"{abs(v):,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
         return f"-{s}" if v < 0 else s
@@ -52,7 +61,6 @@ def _fmt(v: float) -> str:
 
 
 def _col_label(col: str) -> str:
-    """month_01 → Ene, quarter_01 → T1, year_00 → Año."""
     if col.startswith("month_"):
         n = int(col.split("_")[1])
         return MONTH_LABELS_ES[n - 1]
@@ -65,13 +73,11 @@ def _col_label(col: str) -> str:
 
 
 def _available_period_cols(df: pd.DataFrame) -> list[str]:
-    """Columnas de período que tienen datos (suma absoluta > 0)."""
     cols = []
     for c in df.columns:
         if c.startswith(("month_", "quarter_", "year_")):
             if float(df[c].abs().sum()) > 0:
                 cols.append(c)
-    # Orden: meses → trimestres → año
     months   = sorted([c for c in cols if c.startswith("month_")])
     quarters = sorted([c for c in cols if c.startswith("quarter_")])
     years    = sorted([c for c in cols if c.startswith("year_")])
@@ -88,10 +94,6 @@ def build_context(
     yr_prev: str,
     sel_label: str,
 ) -> str:
-    """
-    Construye un texto estructurado con los datos del EERR para pasarle
-    al modelo como contexto.
-    """
     period_cols = _available_period_cols(df_cur)
 
     lines: list[str] = []
@@ -100,22 +102,18 @@ def build_context(
     lines.append(f"Año principal: {yr_cur}  |  Año comparación: {yr_prev}")
     lines.append("")
 
-    # ── Tabla EERR año actual ──────────────────────────────────────
-    header_cols = period_cols
-    col_labels  = [_col_label(c) for c in header_cols]
+    col_labels = [_col_label(c) for c in period_cols]
 
     lines.append(f"### Datos {yr_cur}")
-    header_row = "| Línea | " + " | ".join(col_labels) + " |"
-    sep_row    = "|" + "---|" * (len(col_labels) + 1)
-    lines.append(header_row)
-    lines.append(sep_row)
+    lines.append("| Línea | " + " | ".join(col_labels) + " |")
+    lines.append("|" + "---|" * (len(col_labels) + 1))
 
     for _, row in df_cur.iterrows():
         name = str(row.get("name", "")).strip()
         if not name:
             continue
         vals = []
-        for c in header_cols:
+        for c in period_cols:
             v = row.get(c, 0)
             try:
                 vals.append(_fmt(float(v)))
@@ -125,10 +123,9 @@ def build_context(
 
     lines.append("")
 
-    # ── Tabla EERR año anterior ────────────────────────────────────
     if df_prev is not None:
         prev_cols = _available_period_cols(df_prev)
-        common    = [c for c in header_cols if c in prev_cols]
+        common    = [c for c in period_cols if c in prev_cols]
         if common:
             col_labels_prev = [_col_label(c) for c in common]
             lines.append(f"### Datos {yr_prev}")
@@ -150,37 +147,49 @@ def build_context(
 
     lines.append("---")
     lines.append("Usá estos datos para responder las preguntas del usuario.")
-
     return "\n".join(lines)
 
 
-# ── Llamada al modelo ─────────────────────────────────────────────────
+# ── Streaming por provider ────────────────────────────────────────────
+
+def _stream_anthropic(messages: list[dict], system: str, api_key: str) -> Iterator[str]:
+    import anthropic
+    client = anthropic.Anthropic(api_key=api_key)
+    with client.messages.stream(
+        model=PROVIDERS["anthropic"]["model"],
+        max_tokens=1024,
+        system=system,
+        messages=messages,
+    ) as stream:
+        for text in stream.text_stream:
+            yield text
+
+
+def _stream_groq(messages: list[dict], system: str, api_key: str) -> Iterator[str]:
+    from groq import Groq
+    client = Groq(api_key=api_key)
+    all_msgs = [{"role": "system", "content": system}] + messages
+    stream = client.chat.completions.create(
+        model=PROVIDERS["groq"]["model"],
+        messages=all_msgs,
+        max_tokens=1024,
+        stream=True,
+    )
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
 
 def stream_response(
     messages: list[dict],
     eerr_context: str,
     api_key: str,
+    provider: str = "anthropic",
 ) -> Iterator[str]:
-    """
-    Genera la respuesta del modelo en streaming.
-    `messages` es la lista de mensajes de la conversación (sin el system prompt).
-    Yields: chunks de texto a medida que llegan.
-    """
-    try:
-        import anthropic
-    except ImportError:
-        yield "Error: instalá el paquete `anthropic` (`pip install anthropic`)."
-        return
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    system_with_context = f"{_SYSTEM}\n\n{eerr_context}"
-
-    with client.messages.stream(
-        model=_MODEL,
-        max_tokens=1024,
-        system=system_with_context,
-        messages=messages,
-    ) as stream:
-        for text in stream.text_stream:
-            yield text
+    """Genera respuesta en streaming para el provider indicado."""
+    system = f"{_SYSTEM}\n\n{eerr_context}"
+    if provider == "groq":
+        yield from _stream_groq(messages, system, api_key)
+    else:
+        yield from _stream_anthropic(messages, system, api_key)
