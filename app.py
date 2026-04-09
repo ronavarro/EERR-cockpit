@@ -1363,16 +1363,7 @@ def _render_chat_tab(
     """Renderiza el tab de chat con el analista IA."""
     from eerr_cockpit.agent import PROVIDERS
 
-    # ── Selector de provider ──────────────────────────────────────
-    provider_options = {v["label"]: k for k, v in PROVIDERS.items()}
-    provider_label = st.radio(
-        "Modelo",
-        list(provider_options.keys()),
-        horizontal=True,
-        key="_chat_provider",
-        index=1,  # Groq por defecto
-    )
-    provider = provider_options[provider_label]
+    provider = "groq"
 
     # ── API key ──────────────────────────────────────────────────
     api_key = _get_api_key(provider)
