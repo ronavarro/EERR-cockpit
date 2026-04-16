@@ -1587,12 +1587,10 @@ def main() -> None:
     period_cols_all = get_period_columns(df25)
 
     # ── Tabs ─────────────────────────────────────────────────────
-    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs([
+    t1, t2, t3, t4, t5, t6 = st.tabs([
         "📋  Resumen ejecutivo",
         "📊  EERR",
         "🔍  Drilldown",
-        "✅  Checklist",
-        "🗺️  Mapping Studio",
         "📤  Exportar",
         "📁  Cargar EERR",
         "💬  Analista IA",
@@ -1684,66 +1682,8 @@ def main() -> None:
                     _dd_sublíneas_chart(df25, df24, sc, v25_dd, avail_dd,
                                         currency, is_pct_dd, yr_cur, yr_prev)
 
-    # ── TAB 4: CHECKLIST ─────────────────────────────────────────
+    # ── TAB 4: EXPORTAR ──────────────────────────────────────────
     with t4:
-        val = _validate(df25, df24, period_cols_all, yr_prev)
-        if val["all_passed"]:
-            st.success(f"✅ **{val['status']}**")
-        else:
-            st.warning(f"⚠️ **{val['status']}**")
-        with st.container(border=True):
-            for chk in val["checks"]:
-                c1, c2 = st.columns([1, 9])
-                with c1:
-                    st.markdown("✅" if chk["passed"] else "❌")
-                with c2:
-                    st.markdown(f"**{chk['label']}** — {chk['detail']}")
-
-    # ── TAB 5: MAPPING STUDIO ────────────────────────────────────
-    with t5:
-        with st.container(border=True):
-            st.markdown('<div class="sec-hdr">🗺️ Mapping Studio — ERP → Línea EERR</div>', unsafe_allow_html=True)
-            st.caption("Placeholder editable · Integración ERP en roadmap")
-            eerr_lines = [f"{r.get('code','')} — {r.get('name','')}" for _, r in df25.iterrows()]
-            col_ed, col_io = st.columns([3, 1])
-            with col_ed:
-                edited = st.data_editor(
-                    st.session_state.mapping_df, num_rows="dynamic",
-                    column_config={
-                        "Cuenta":      st.column_config.TextColumn("Cuenta ERP",  width="medium"),
-                        "Descripción": st.column_config.TextColumn("Descripción", width="large"),
-                        "Línea EERR":  st.column_config.SelectboxColumn(
-                            "Línea EERR", options=[""] + eerr_lines, width="large"),
-                        "Regla":       st.column_config.TextColumn("Regla", width="medium"),
-                    }, use_container_width=True, key="map_ed")
-                st.session_state.mapping_df = edited
-                if not edited.empty:
-                    mapped = edited["Línea EERR"].notna().sum()
-                    total  = len(edited)
-                    st.metric("Cobertura",
-                              f"{mapped/total*100:.1f}%" if total else "0%",
-                              f"{mapped}/{total} cuentas mapeadas")
-            with col_io:
-                if not st.session_state.mapping_df.empty:
-                    st.download_button("📥 CSV",
-                                       data=st.session_state.mapping_df.to_csv(index=False),
-                                       file_name="mapping.csv", mime="text/csv")
-                    st.download_button("📥 JSON",
-                                       data=st.session_state.mapping_df.to_json(
-                                           orient="records", force_ascii=False),
-                                       file_name="mapping.json", mime="application/json")
-                imp = st.file_uploader("Importar", type=["csv", "json"], key="map_imp")
-                if imp:
-                    try:
-                        st.session_state.mapping_df = (
-                            pd.read_csv(imp) if imp.name.endswith(".csv") else pd.read_json(imp))
-                        st.success("✅")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(str(exc))
-
-    # ── TAB 6: EXPORTAR ──────────────────────────────────────────
-    with t6:
         with st.container(border=True):
             st.markdown('<div class="sec-hdr">📤 Pack Mensual PDF</div>', unsafe_allow_html=True)
             c1, c2 = st.columns(2)
@@ -1777,12 +1717,12 @@ def main() -> None:
             st.info("🚧 En desarrollo · 3 slides: Resumen · EERR · Top variaciones")
             st.button("📑 Generar PPT", disabled=True)
 
-    # ── TAB 7: CARGAR EERR ───────────────────────────────────────
-    with t7:
+    # ── TAB 5: CARGAR EERR ───────────────────────────────────────
+    with t5:
         _render_upload_tab(username)
 
-    # ── TAB 8: ANALISTA IA ───────────────────────────────────────
-    with t8:
+    # ── TAB 6: ANALISTA IA ───────────────────────────────────────
+    with t6:
         _render_chat_tab(df25, df24, currency, yr_cur, yr_prev, sel_label)
 
 
