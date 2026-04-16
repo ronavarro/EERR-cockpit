@@ -365,6 +365,105 @@ table.eerr tbody td.num {{ text-align: right; font-variant-numeric: tabular-nums
 }}
 .pos-txt {{ color: {CG}; font-weight: 700; }}
 .neg-txt {{ color: {CR}; font-weight: 700; }}
+
+/* ════════════════════════════════════════
+   MOBILE  (≤ 768px)
+   ════════════════════════════════════════ */
+@media (max-width: 768px) {{
+
+    /* ── Layout general ── */
+    .block-container {{
+        padding: 0 0.75rem 1.5rem !important;
+    }}
+
+    /* ── Sidebar: colapsar completamente en mobile ── */
+    [data-testid="stSidebar"] {{
+        min-width: unset !important;
+        max-width: 85vw !important;
+    }}
+    [data-testid="stSidebarCollapseButton"] {{
+        display: flex !important;
+    }}
+
+    /* ── Header: compacto en mobile ── */
+    .app-header {{
+        height: auto !important;
+        padding: 10px 14px !important;
+        border-radius: 12px !important;
+        gap: 10px !important;
+        flex-wrap: wrap;
+    }}
+    .app-header-logo img {{
+        height: 30px !important;
+    }}
+    .app-header-divider {{ display: none !important; }}
+    .app-header-text h1 {{ font-size: 14px !important; }}
+    .app-header-text p  {{ display: none !important; }}
+    .header-right {{ width: 100%; justify-content: flex-end; }}
+    .hdr-toggle-wrap {{ font-size: 11px !important; gap: 6px !important; }}
+
+    /* ── Tabs: scroll horizontal, texto más pequeño ── */
+    [data-testid="stTabs"] [role="tablist"] {{
+        overflow-x: auto !important;
+        flex-wrap: nowrap !important;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }}
+    [data-testid="stTabs"] [role="tablist"]::-webkit-scrollbar {{ display: none; }}
+    [data-testid="stTabs"] button[role="tab"] {{
+        font-size: 11px !important;
+        padding: 8px 12px !important;
+        white-space: nowrap !important;
+    }}
+
+    /* ── KPI cards: 2 columnas en mobile ── */
+    .kpi-wrap {{ height: auto !important; min-height: 100px; }}
+    .kpi-card {{ height: auto !important; min-height: 100px; padding: 12px !important; }}
+    .kpi-val  {{ font-size: 17px !important; }}
+    .kpi-lbl  {{ font-size: 9px !important; }}
+    .kpi-badge {{ font-size: 10px !important; padding: 2px 6px !important; }}
+
+    /* ── Columnas de Streamlit: apilar en mobile ── */
+    [data-testid="column"] {{
+        min-width: 100% !important;
+        width: 100% !important;
+    }}
+
+    /* ── Tabla EERR: scroll horizontal ── */
+    table.eerr {{
+        font-size: 11px !important;
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }}
+    table.eerr thead th,
+    table.eerr tbody td {{
+        padding: 6px 8px !important;
+        white-space: nowrap;
+    }}
+
+    /* ── Alert rows ── */
+    .alert-row {{
+        flex-direction: column;
+        align-items: flex-start !important;
+        gap: 4px;
+        padding: 8px 10px !important;
+    }}
+    .alert-name {{ font-size: 12px !important; }}
+    .alert-delta {{ font-size: 12px !important; }}
+
+    /* ── AI Insight ── */
+    .ai-insight-card {{ padding: 14px 16px !important; }}
+    .ai-insight-text {{ font-size: 13px !important; }}
+
+    /* ── Sección header ── */
+    .sec-hdr {{ font-size: 12px !important; }}
+
+    /* ── Chat: panel lateral se apila debajo ── */
+    [data-testid="column"]:has(.stChatInput) {{
+        order: -1;
+    }}
+}}
 </style>
 """, unsafe_allow_html=True)
 
