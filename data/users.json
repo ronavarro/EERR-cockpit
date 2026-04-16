@@ -1,10 +1,6 @@
 {
-  "admin": {
-    "password_hash": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
-    "display_name": "Administrador"
-  },
-  "rodrigo": {
-    "password_hash": "cedecff6dc4d29455ab8d0d474f2b61b7aea7a7bb080efe2b2c8304fcadacf43",
-    "display_name": "Rodrigo Navarro"
-  }
+    "demo": {
+        "password_hash": "d3ad9315b7be5dd53b31a273b3b3aba5defe700808305aa16a3062b76658a791",
+        "display_name": "Usuario Demo"
+    }
 }

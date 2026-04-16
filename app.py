@@ -1514,6 +1514,10 @@ def _render_chat_tab(
 
 
 def main() -> None:
+    # ── Demo data: siempre disponible antes del login ─────────────
+    from eerr_cockpit.demo_data import ensure_demo_data
+    ensure_demo_data(storage)
+
     # ── Auth gate ────────────────────────────────────────────────
     if not auth.is_authenticated():
         auth.render_login()
