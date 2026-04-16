@@ -1,34 +1,51 @@
 """
 Demo data para EERR Cockpit — Distribuidora Austral S.A.
 Empresa ficticia de distribución de alimentos y bebidas, Argentina.
-Datos realistas: 2025 completo + 2026 Ene/Feb/Mar.
+Datos realistas: 2024 completo + 2025 completo + 2026 Ene/Feb/Mar.
 """
 from __future__ import annotations
 import pandas as pd
 
 # ── Parámetros mensuales: (ventas_M_ARS, cogs_pct, ebitda_pct, fin_pct) ──
-# 2025: crecimiento sostenido a lo largo del año, márgenes sólidos 15-19%
+
+# 2024: año de crecimiento moderado, márgenes estables 13-16%
+_P24 = [
+    ( 490, 0.635, 0.135, -0.028),  # Ene
+    ( 452, 0.638, 0.130, -0.028),  # Feb
+    ( 538, 0.632, 0.138, -0.027),  # Mar
+    ( 565, 0.630, 0.142, -0.027),  # Abr
+    ( 598, 0.628, 0.146, -0.027),  # May
+    ( 645, 0.626, 0.150, -0.026),  # Jun
+    ( 621, 0.633, 0.138, -0.028),  # Jul
+    ( 668, 0.630, 0.142, -0.028),  # Ago
+    ( 715, 0.625, 0.148, -0.027),  # Sep
+    ( 761, 0.627, 0.147, -0.027),  # Oct
+    ( 806, 0.630, 0.143, -0.029),  # Nov
+    ( 905, 0.624, 0.155, -0.026),  # Dic
+]
+
+# 2025: crecimiento nominal ~73% vs 2024 (inflación + volumen), márgenes 15-19%
 _P25 = [
-    ( 850, 0.620, 0.160, -0.030),  # Ene — arranque del año
-    ( 782, 0.625, 0.155, -0.031),  # Feb — mes corto, margen algo menor
-    ( 926, 0.618, 0.165, -0.030),  # Mar — recuperación
-    ( 977, 0.615, 0.170, -0.029),  # Abr — buena temporada
-    (1028, 0.612, 0.175, -0.029),  # May — acelerando
-    (1113, 0.610, 0.180, -0.028),  # Jun — pico H1
-    (1071, 0.618, 0.165, -0.030),  # Jul — pausa estacional
-    (1148, 0.615, 0.170, -0.030),  # Ago — retoma
-    (1232, 0.608, 0.178, -0.029),  # Sep — fuerte
-    (1309, 0.610, 0.177, -0.029),  # Oct — pre-temporada alta
-    (1386, 0.613, 0.172, -0.031),  # Nov — Black Friday
-    (1555, 0.608, 0.185, -0.028),  # Dic — mejor mes del año
+    ( 850, 0.620, 0.160, -0.030),  # Ene
+    ( 782, 0.625, 0.155, -0.031),  # Feb
+    ( 926, 0.618, 0.165, -0.030),  # Mar
+    ( 977, 0.615, 0.170, -0.029),  # Abr
+    (1028, 0.612, 0.175, -0.029),  # May
+    (1113, 0.610, 0.180, -0.028),  # Jun
+    (1071, 0.618, 0.165, -0.030),  # Jul
+    (1148, 0.615, 0.170, -0.030),  # Ago
+    (1232, 0.608, 0.178, -0.029),  # Sep
+    (1309, 0.610, 0.177, -0.029),  # Oct
+    (1386, 0.613, 0.172, -0.031),  # Nov
+    (1555, 0.608, 0.185, -0.028),  # Dic
 ]
 
 # 2026 Q1: crecimiento nominal ~65% vs Q1 2025 (inflación + volumen)
 # Presión de márgenes: COGS sube más que ventas, EBITDA margin cae a 13-14%
 _P26 = [
-    (1402, 0.640, 0.130, -0.040),  # Ene 2026 — +65% vs Ene 2025
-    (1290, 0.645, 0.124, -0.041),  # Feb 2026 — +65% vs Feb 2025
-    (1527, 0.638, 0.136, -0.039),  # Mar 2026 — +65% vs Mar 2025
+    (1402, 0.640, 0.130, -0.040),  # Ene — +65% vs Ene 2025
+    (1290, 0.645, 0.124, -0.041),  # Feb — +65% vs Feb 2025
+    (1527, 0.638, 0.136, -0.039),  # Mar — +65% vs Mar 2025
 ]
 
 # ── Esquema de líneas del EERR ────────────────────────────────────────
@@ -191,22 +208,41 @@ def _build_df(params: list[tuple], year: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_demo_raw(months_2026: int = 3) -> dict:
+def get_demo_raw_2025() -> dict:
     """
-    Retorna el dict raw listo para pasar a storage.save_upload():
-      { 'ARS': { '2025': df_full, '2026': df_with_n_months } }
+    EERR 2025 completo con 2024 como año de comparación.
+      { 'ARS': { '2024': df_2024_full, '2025': df_2025_full } }
+    """
+    df24 = _build_df(_P24, "2024")
+    df25 = _build_df(_P25, "2025")
+    return {"ARS": {"2024": df24, "2025": df25}}
+
+
+def get_demo_raw_2026(months: int) -> dict:
+    """
+    EERR 2026 acumulado (n meses) con 2025 completo como comparación.
+      { 'ARS': { '2025': df_2025_full, '2026': df_2026_n_months } }
     """
     df25 = _build_df(_P25, "2025")
-    df26 = _build_df(_P26[:months_2026], "2026")
+    df26 = _build_df(_P26[:months], "2026")
     return {"ARS": {"2025": df25, "2026": df26}}
 
 
 def ensure_demo_data(storage_module, demo_user: str = "demo") -> None:
     """
-    Crea los uploads demo para el usuario 'demo' si no existen.
-    Se llama al inicio de la app — es idempotente.
+    Crea los uploads demo si no existen. Idempotente.
+
+    Uploads generados:
+      - Diciembre 2025 → 2025 completo vs 2024 completo
+      - Enero 2026     → 2026 Ene vs 2025 completo
+      - Febrero 2026   → 2026 Ene+Feb vs 2025 completo
+      - Marzo 2026     → 2026 Ene+Feb+Mar vs 2025 completo
     """
     existing = {(u["year"], u["month"]) for u in storage_module.list_uploads(demo_user)}
-    for year, month, n_months in [(2026, 1, 1), (2026, 2, 2), (2026, 3, 3)]:
-        if (year, month) not in existing:
-            storage_module.save_upload(demo_user, year, month, get_demo_raw(n_months))
+
+    if (2025, 12) not in existing:
+        storage_module.save_upload(demo_user, 2025, 12, get_demo_raw_2025())
+
+    for month, n_months in [(1, 1), (2, 2), (3, 3)]:
+        if (2026, month) not in existing:
+            storage_module.save_upload(demo_user, 2026, month, get_demo_raw_2026(n_months))
