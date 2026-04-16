@@ -70,8 +70,8 @@ _SCHEMA = [
 
 
 def _compute(v: float, cogs_p: float, ebitda_p: float, fin_p: float) -> dict:
-    """Calcula todos los valores del EERR para un mes dado."""
-    v = int(v)
+    """Calcula todos los valores del EERR para un mes dado. v en millones de ARS."""
+    v = int(v) * 1_000_000
 
     # Ingresos
     dist   = round(v * 0.600)
